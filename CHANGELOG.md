@@ -29,6 +29,29 @@ Notable changes to GT7 Datalogger. The format follows
 
 ### Added
 
+- **Lap analysis: a session as a few hundred labelled numbers.** (#115) A
+  lap is stored and exported as its 60 Hz recording, which is the right shape
+  for a chart and the wrong one for anything that has to reason about the
+  driving. **Sessions → Export analysis** (`GET
+  /api/sessions/{id}/analysis.json`) compiles the session into one
+  `gt7-datalogger-lap-analysis` v1 document: every lap measured per corner
+  against the session's best counting lap, on that lap's distance axis, through
+  the circuit's authored corners where it has them (the document says which).
+  Per corner of each lap: the braking zone (where it began and ended, peak
+  pedal, length, lockups, metres later or earlier than the reference),
+  turn-in and how far the brake was carried past it, minimum speed and where
+  it sat against the apex, throttle pick-up and full throttle, wheelspin and
+  TCS on the exit, time lost in the corner **and on the approach to it**, the
+  line against the reference at entry, apex and exit, and on a surveyed
+  circuit the road left to each edge. Per lap: fuel, tyre temperatures, aids
+  use, event counts, upshift RPM by gear. The car's power, weight and PP are
+  the inventory's and are written under `car.stock`, because GT7 does not
+  broadcast them for the car as tuned; the gear ratios are the session's own. Per authored section: time and a
+  speed trap. Per session: each corner's spread in braking point, minimum
+  speed and time across the clean laps. No samples and no positions — about
+  100 KB for ten laps, compiled in a few tenths of a second, one lap in
+  memory at a time. The same file is in the session ZIP as `analysis.json`.
+  See `docs/reference/lap-analysis-format.md`.
 - **The shared repo's corrections come with a pull, and the map is compiled
   from them.** The repo's editor never deletes evidence; it keeps a
   `corrections/<slug>.json` beside each corrected bundle — areas the map
@@ -50,6 +73,25 @@ Notable changes to GT7 Datalogger. The format follows
 
 ### Changed
 
+- **The Race Engineer's coaching compares laps by place, and knows which
+  corner a braking zone belongs to.** (#110) Two things were wrong with
+  "you braked twelve metres earlier into turn five". The laps were compared
+  at equal *distance*, and a lap's own distance drifts from another's by a
+  median 2.9 m and up to 64 m — the Analysis view has lined laps up by
+  position since 0.6, the engineer had not. And the braking point was "the
+  first brake application in the 250 m before the corner's entry", which
+  through a sequence is often the corner before's: on the best laps of nine
+  stored sessions it disagreed with where the corner's braking zone began at
+  41 of 105 corners. Coaching now puts every lap on the reference lap's
+  axis before comparing (off the event loop, at the lap boundary), and takes
+  what a lap did at a corner from `processing/corner_metrics` — each brake
+  application belongs to one corner, the first apex its midpoint has not
+  reached, and a corner's braking zone is the one that took the most speed
+  off. The lap analysis document uses the same definitions, so the two
+  cannot disagree. Replayed over 21 stored sessions the number of coaching
+  notes is unchanged (120) and 59 are word for word the same; gone are the
+  likes of "you are braking early into turn ten, about two hundred thirteen
+  meters". Thresholds for what is worth saying are unchanged.
 - **SQLAlchemy 2.1 or newer is required.** The repository layer's `Select`
   and `Row` annotations follow 2.1's variadic generics (a five-column
   projection is `Row[int, int, int, bool, bool]`; a row of any shape is

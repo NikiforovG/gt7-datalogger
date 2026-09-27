@@ -478,6 +478,37 @@ def _anchor_dist(
     return d[i] if gap <= CORNER_ANCHOR_MAX_M else None
 
 
+def project_sections(
+    samples: Samples, authored: list[dict[str, Any]]
+) -> list[dict[str, float | int | str]]:
+    """Place a circuit's authored sections on one lap's distance axis.
+
+    A section is a named stretch of road — "Kemmel Straight", "Backstretch" —
+    stored in the bundle as the world positions of its two ends, for the
+    reason corners are: a distance belongs to the line one lap took. Each
+    end is where this lap passed nearest to it. A section with an end this
+    lap never came near is left out rather than guessed at, and one whose
+    start is past its end runs across the start line.
+    """
+    d, xs, zs, _ = _lap_path(samples)
+    if len(d) < 8:
+        return []
+    out: list[dict[str, float | int | str]] = []
+    for index, section in enumerate(authored):
+        start = _anchor_dist(section.get("start"), d, xs, zs)
+        end = _anchor_dist(section.get("end"), d, xs, zs)
+        if start is None or end is None or start == end:
+            continue
+        out.append({
+            "n": int(section.get("n", index + 1)),
+            "name": str(section.get("name") or ""),
+            "start_dist": round(start, 1),
+            "end_dist": round(end, 1),
+        })
+    out.sort(key=lambda sec: float(sec["start_dist"]))
+    return out
+
+
 def _turn_angle_deg(xs: list[float], zs: list[float], lo: int, hi: int) -> float:
     """Heading change the lap actually made across the corner's extent.
 

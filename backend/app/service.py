@@ -15,9 +15,10 @@ from fastapi import WebSocket
 from app.config import Settings
 from app.models import TelemetryPacket
 from app.notify import Notifier
-from app.processing import alignment, track_bundle, track_limits, tracks
+from app.processing import alignment, track_bundle, track_compile, track_limits, tracks
 from app.processing.analysis import Samples, time_delta_at
 from app.processing.cars import CarDatabase
+from app.processing.lap_analysis import SessionAnalysis
 from app.processing.laps import (
     CompletedLap,
     LapProcessor,
@@ -174,6 +175,9 @@ class TelemetryService:
         # at every lap boundary to re-read seventeen apexes would be absurd.
         # Invalidated when the refine view saves.
         self._authored: dict[str, list[dict[str, Any]]] = {}
+        # The circuit's authored sections, beside them and for the same
+        # reason (#115): named stretches the lap analysis times.
+        self._authored_sections: dict[str, list[dict[str, Any]]] = {}
 
     def authored_corners(self, track: str) -> list[dict[str, Any]]:
         """A circuit's hand-labelled corners, if it has any. Blocking: the
@@ -183,13 +187,95 @@ class TelemetryService:
         key = track_bundle.slugify(track)
         corners = self._authored.get(key)
         if corners is None:
-            doc = track_bundle.load(self.settings.db_path.parent, track)
-            corners = doc["corners"] if doc else []
-            self._authored[key] = corners
+            corners = self._read_authored(track)[0]
         return corners
 
+    def authored_sections(self, track: str) -> list[dict[str, Any]]:
+        """A circuit's named sections, if it has any. Blocking, like the
+        corners they are stored beside."""
+        if not track:
+            return []
+        key = track_bundle.slugify(track)
+        sections = self._authored_sections.get(key)
+        if sections is None:
+            sections = self._read_authored(track)[1]
+        return sections
+
+    def _read_authored(
+        self, track: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """One parse of the bundle fills both caches."""
+        key = track_bundle.slugify(track)
+        doc = track_bundle.load(self.settings.db_path.parent, track)
+        corners = list(doc.get("corners") or []) if doc else []
+        sections = list(doc.get("sections") or []) if doc else []
+        self._authored[key] = corners
+        self._authored_sections[key] = sections
+        return corners, sections
+
+    async def lap_analysis(self, session_id: int) -> dict[str, Any] | None:
+        """The session's lap analysis document (#115): every lap measured
+        per corner against the session's best. None for no such session.
+
+        Compiled from the database each time it is asked for, never stored:
+        a lap ruled in or out of the bests changes the reference, and with
+        it every figure in the document. Laps are read one at a time, as the
+        session archive reads them, so a long session costs the memory of
+        two laps; everything that touches their samples runs off the event
+        loop.
+        """
+        session = await self.repo.get_session(session_id)
+        if session is None:
+            return None
+        rows = [
+            row
+            for row in await self.repo.list_laps(session_id)
+            if (row["total_ticks"] or 0) > 0
+        ]
+        rows.sort(key=lambda row: (row["number"], row["id"]))
+        track = str(session["track_name"] or "")
+        counting = [row for row in rows if row["counts_for_best"] and row["time_ms"] > 0]
+        reference = min(counting, key=lambda row: (row["time_ms"], row["id"]), default=None)
+        reference_json = (
+            await self.repo.lap_samples_json(reference["id"]) if reference is not None else None
+        )
+        official_id = await self.official_id_for(track)
+        data_dir = self.settings.db_path.parent
+
+        def _open() -> SessionAnalysis:
+            circuit: dict[str, Any] = {"name": track}
+            if official_id:
+                circuit["official_id"] = official_id
+            return SessionAnalysis(
+                session=session,
+                circuit=circuit,
+                reference=reference,
+                reference_samples=decode_samples(reference_json) if reference_json else None,
+                authored_corners=self.authored_corners(track),
+                authored_sections=self.authored_sections(track),
+                borders=track_limits.border_index_for_track(data_dir, track),
+                app_version=track_compile.app_version(),
+            )
+
+        compiler = await asyncio.to_thread(_open)
+        for row in rows:
+            lap = await self.repo.get_lap(row["id"], with_samples=False)
+            raw = await self.repo.lap_samples_json(row["id"])
+            if lap is None or raw is None:
+                continue  # deleted while the document was being compiled
+
+            def _add(
+                row: dict[str, Any] = row, lap: dict[str, Any] = lap, raw: str = raw
+            ) -> None:
+                compiler.add(row, decode_samples(raw), lap["events"], lap["gearing"])
+
+            await asyncio.to_thread(_add)
+        return await asyncio.to_thread(compiler.document)
+
     def invalidate_authored_corners(self, track: str) -> None:
-        self._authored.pop(track_bundle.slugify(track), None)
+        key = track_bundle.slugify(track)
+        self._authored.pop(key, None)
+        self._authored_sections.pop(key, None)
         self._official_ids.pop(track, None)
 
     async def official_id_for(self, track: str) -> str:
@@ -444,6 +530,9 @@ class TelemetryService:
 
         if self.engineer_active:
             self.engineer.ctx.track_name = self.track_name
+            # Lining the lap up with the coaching reference is a walk along
+            # its whole path: off the event loop, before the detectors run.
+            await self.engineer.prepare_lap(lap)
             self._publish_callouts(self.engineer.on_lap(lap))
             # Corner detection for coaching runs off the event loop; a lap
             # boundary is the only place it can afford to happen.

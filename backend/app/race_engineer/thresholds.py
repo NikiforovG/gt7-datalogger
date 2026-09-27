@@ -79,9 +79,10 @@ BRAKE_POINT_MIN_M = 10.0
 
 # Minimum time lost in one corner (vs the session best) before it is coached.
 CORNER_LOSS_MIN_MS = 150.0
-# How far back from a corner's entry the braking point is looked for.
-CORNER_BRAKE_SEARCH_M = 250.0
-CORNER_BRAKE_ON_PCT = 20.0  # same gate processing/events.py uses for braking
+# What counts as a braking point — the pedal gate, how far before a corner it
+# may begin, which corner an application belongs to — is not a threshold of
+# the engineer's: it is processing/corner_metrics' definition, shared with
+# the lap analysis document. Only what is worth SAYING is decided here.
 # Differences smaller than these are inside lap-to-lap noise; mentioning them
 # would send a driver chasing a braking marker they already hit.
 CORNER_BRAKE_DIFF_MIN_M = 5.0

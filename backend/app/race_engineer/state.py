@@ -6,8 +6,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.models import TelemetryPacket
+from app.processing import alignment
+from app.processing.corner_metrics import CornerMeasure, LapTrace, measure, windows
 from app.processing.laps import CompletedLap
 from app.processing.strategy import LapFuel
+
+Samples = dict[str, list[float]]
 
 # Same rule as the lap processor: time comes from the console's packet
 # counter, never the wall clock. Pauses add no time (GT7 keeps streaming at
@@ -37,6 +41,66 @@ class PacketClock:
 
 
 @dataclass(slots=True)
+class LapOnAxis:
+    """A lap placed on the coaching reference's distance axis.
+
+    A lap's own `dist` is integrated from its own speed, so two laps reach
+    the same metre mark at different places on the road — a median 2.9 m
+    apart and 64 m at worst over real lap pairs (see processing/alignment).
+    Coaching compares braking points to within 5 m, so it compares them on
+    ONE axis: the reference lap's, which every other lap is projected onto
+    by where it was. The events move with the samples.
+
+    `aligned` is False for a lap that could not be placed with confidence
+    (and for every lap while there is no reference): it keeps its own
+    distance, which is what every comparison used before.
+    """
+
+    # The reference this lap was placed against, held so that a change of
+    # reference is noticed by identity and the lap placed again.
+    reference: Samples | None
+    samples: Samples
+    events: list[dict[str, Any]]
+    aligned: bool
+    _measures: dict[int, CornerMeasure] | None = None
+    _measured_for: list[dict[str, float | int | str]] | None = None
+
+    def measures(
+        self, corners: list[dict[str, float | int | str]]
+    ) -> dict[int, CornerMeasure]:
+        """What the lap did at each of `corners`, by corner number. Worked
+        out once per set of corners: a millisecond or two a lap, but asked
+        for by every corner of every comparison."""
+        if self._measures is None or self._measured_for is not corners:
+            self._measures = measure(LapTrace(self.samples), windows(list(corners)))
+            self._measured_for = corners
+        return self._measures
+
+
+def place_on_axis(
+    samples: Samples,
+    events: list[dict[str, Any]],
+    reference: Samples | None,
+) -> LapOnAxis:
+    """`samples` on `reference`'s distance axis. Tens of milliseconds for a
+    full lap: the live path runs it on a worker thread (the manager's
+    `prepare_lap`), the replay is on one already."""
+    if reference is None or samples is reference:
+        return LapOnAxis(reference, samples, events, aligned=samples is reference)
+    path = alignment.ReferencePath(reference) if reference.get("pos_x") else None
+    moved = alignment.align_to_reference(samples, path) if path is not None else None
+    if moved is None:
+        return LapOnAxis(reference, samples, events, aligned=False)
+    own = samples.get("dist") or []
+    return LapOnAxis(
+        reference,
+        moved,
+        alignment.remap_events(events, own, moved["dist"]),
+        aligned=True,
+    )
+
+
+@dataclass(slots=True)
 class LapRecord:
     """A completed lap as the detectors need it (kept across sessions)."""
 
@@ -52,6 +116,9 @@ class LapRecord:
     invalidated_best: bool = False
     events: list[dict[str, Any]] = field(default_factory=list)
     samples: dict[str, list[float]] = field(default_factory=dict)
+    # The lap on the coaching reference's axis, once something has asked for
+    # it (EngineerContext.on_axis). Stale as soon as the reference changes.
+    axis: LapOnAxis | None = None
 
     @classmethod
     def from_lap(cls, lap: CompletedLap) -> LapRecord:
@@ -109,6 +176,34 @@ class EngineerContext:
     # losses, where a lockup happened — is meaningless before then, because a
     # lap the logger only half-saw has its distance axis anchored elsewhere.
     span_confirmed: bool = False
+    # The reference lap on its own axis — it is rarely one of `laps` (the
+    # history is capped, and the replay keeps no record of it at all).
+    _reference_axis: LapOnAxis | None = None
+
+    def on_axis(self, rec: LapRecord) -> LapOnAxis:
+        """`rec` on the reference's distance axis, placed once per reference.
+
+        A lap from an earlier session stays on its own axis: the history
+        spans sessions for the fuel model's sake, and a lap driven before a
+        restart may not even be of this circuit.
+        """
+        ref = self.reference if rec.session_seq == self.session_seq else None
+        view = rec.axis
+        if view is None or view.reference is not ref:
+            view = place_on_axis(rec.samples, rec.events, ref)
+            rec.axis = view
+        return view
+
+    def reference_measures(self) -> dict[int, CornerMeasure]:
+        """What the reference lap itself did at each corner."""
+        ref = self.reference
+        if ref is None:
+            return {}
+        view = self._reference_axis
+        if view is None or view.reference is not ref:
+            view = place_on_axis(ref, [], ref)
+            self._reference_axis = view
+        return view.measures(self.corners)
 
     def corner_at(self, dist_m: float) -> int | None:
         """Corner number containing a track distance, if any.

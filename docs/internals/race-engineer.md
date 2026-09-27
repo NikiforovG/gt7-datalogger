@@ -146,6 +146,21 @@ reported a real (short) time for it.
 
 ## Coaching
 
+Coaching compares laps **by place, not by distance**. A lap's own distance is
+integrated from its own speed, so two laps reach the same metre mark at different
+places on the road — a median 2.9 m apart over real lap pairs and 64 m at worst
+([Lap comparison math](analysis-math.md)) — and a braking point is judged to within
+5 m. Every lap is therefore put on the **reference lap's distance axis** before
+anything is compared (`EngineerContext.on_axis`, which is `alignment.align_to_reference`
+with the lap's events moved along with it). A lap that cannot be lined up with
+confidence keeps its own distance, as does a lap from an earlier session.
+
+Lining a lap up is a walk along the reference's whole path — tens of milliseconds,
+several times that on a Raspberry Pi — so it never runs on the event loop:
+`prepare_lap` places the finished lap on a worker thread before `on_lap` runs the
+detectors, and `refresh_reference` re-places the last three laps on the same thread
+that detects the new reference's corners.
+
 **Repeated lockups / wheelspin / bottoming** buckets `detect_events` output by 120 m
 of track distance across the last three laps, keyed by wheel, and needs three
 occurrences past a severity gate before it speaks. The bucket's mean distance is
@@ -166,8 +181,8 @@ of a slump, and "your pace is dropping" seconds after one reads as a bug. A reco
 increments a spell counter that is part of the dedupe key, so a second slump later in
 the stint is speakable again while a still-slipping one escalates instead of repeating.
 
-**Braking point** (`_braking_point`) compares where the brake first goes past 20 % in
-the approach to each corner against the reference lap, and speaks only when every one
+**Braking point** (`_braking_point`) compares where each lap's braking zone for a
+corner began against the reference lap's, and speaks only when every one
 of the last two laps is on the same side of it and the *mildest* of them is still more
 than 10 m off. Reporting the mildest lap rather than the worst gives a driver a marker
 they can trust; one early stop is a moment, not a habit. Independent of time loss on
@@ -185,8 +200,32 @@ laps directly:
 
 | Measure | How | Noise floor |
 | --- | --- | --- |
-| Braking point | first sample above 20 % brake within 250 m before the corner's entry | 5 m |
+| Braking point | where the corner's braking zone began (below) | 5 m |
 | Apex speed | minimum speed between entry and exit | 2 km/h |
+
+What a lap did at a corner is not defined here. It is
+`app/processing/corner_metrics.py`'s answer, shared with the
+[lap analysis document](../reference/lap-analysis-format.md#what-is-measured-at-a-corner),
+so the engineer and the export cannot disagree about where a driver braked:
+
+- A **brake application** is the pedal at or above 20 % (the gate
+  `processing/events.py` uses for a lockup) for at least 0.1 s; two applications less
+  than 10 m apart are one.
+- Each application belongs to **one corner**: the first apex its *midpoint* has not
+  yet reached, provided it began no more than 250 m before that corner's entry. The
+  midpoint, so that trail braking carried a few metres past an apex still belongs to
+  it.
+- A corner's **braking zone** is the application, of those it was given, that took
+  the most speed off, and its braking point is where that zone began.
+
+The braking point used to be "the first sample above 20 % brake within 250 m before
+the corner's entry". Through a sequence of corners that is often the braking for
+the corner *before*, and a brake applied after an authored corner's entry marker (its
+apex − 75 m, not where the driver turned in) was not found at all. On the best laps
+of nine stored sessions it disagreed with where the corner's braking zone began at 41
+of 105 corners — 13 of Mount Panorama's 23 — and replayed over 21 sessions it
+produced callouts such as "you are braking early into turn ten, about two hundred
+thirteen meters".
 
 Either measure is dropped when it is inside its noise floor or missing (a flat-out
 corner has no braking point), and when neither survives the callout falls back to the

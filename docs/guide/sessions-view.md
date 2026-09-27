@@ -161,6 +161,22 @@ Row actions:
 circuit, tags, note and race result — a backup or a hand-off in one click. See
 [Session archive](../reference/lap-file-format.md#session-archive-zip).
 
+**Export analysis** beside it downloads `gt7-session-<id>-analysis.json`, the
+session's **lap analysis**: every lap measured corner by corner against the session's
+best lap, in one small file. For each corner of each lap it says where the brake went
+on and came off, how hard it was pressed and whether it was still on when the car
+turned in; the slowest speed and where it was; where the throttle came back and
+reached full; the time lost in the corner and on the straight before it; how far off
+the best lap's line the car ran; and, on a surveyed circuit, how much road was left
+on each side. It also carries each lap's fuel, tyre temperatures and aids use, the
+upshift RPM per gear, and how consistent each corner was across the session.
+
+It is a file to hand to something that will read it — a coach, a spreadsheet, an
+assistant — rather than one to look at: about 100 KB where the session's recordings
+are tens of megabytes, with every number labelled. The same file is inside the
+session ZIP as `analysis.json`. See
+[Lap analysis format](../reference/lap-analysis-format.md).
+
 **Delete session** removes the session and all its laps.
 
 ## Header actions

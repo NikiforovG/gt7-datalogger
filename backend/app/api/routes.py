@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import logging
 import math
 import tempfile
 from collections.abc import Iterator
@@ -25,6 +26,8 @@ from app.storage.db import ExcludeReason
 
 if TYPE_CHECKING:
     from app.service import TelemetryService
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
@@ -145,9 +148,21 @@ async def export_session(request: Request, session_id: int) -> StreamingResponse
     app.storage.archive for the layout. Written whole before the response
     starts, so a failure is an error status rather than a truncated file.
     """
+    # The analysis rides along, but the archive is a backup first: a session
+    # whose figures cannot be compiled still exports every lap it has.
+    try:
+        document = await svc(request).lap_analysis(session_id)
+    except Exception:  # noqa: BLE001 - derived data must not cost the export
+        log.warning("session %d: lap analysis left out of the archive", session_id,
+                    exc_info=True)
+        document = None
+    if document is not None and not document["laps"]:
+        document = None  # nothing was driven: there is nothing to analyse
     spool = tempfile.SpooledTemporaryFile(max_size=ARCHIVE_SPOOL_BYTES)
     try:
-        found = await archive.write_session_archive(svc(request).repo, session_id, spool)
+        found = await archive.write_session_archive(
+            svc(request).repo, session_id, spool, analysis=document
+        )
     except BaseException:
         spool.close()
         raise
@@ -164,6 +179,21 @@ async def export_session(request: Request, session_id: int) -> StreamingResponse
             "Content-Length": str(size),
         },
     )
+
+
+@router.get("/sessions/{session_id}/analysis.json")
+async def session_analysis(request: Request, session_id: int) -> dict[str, Any]:
+    """The session's lap analysis document (#115): each lap measured per
+    corner against the session's best — braking, minimum speed, throttle,
+    time lost, line — in a few hundred labelled numbers instead of the 60 Hz
+    series. See app.processing.lap_analysis for what is in it and why.
+
+    Compiled on request: a few tenths of a second for a ten-lap session.
+    """
+    document = await svc(request).lap_analysis(session_id)
+    if document is None:
+        raise HTTPException(404, "session not found")
+    return document
 
 
 @router.get("/sessions/{session_id}/laps")

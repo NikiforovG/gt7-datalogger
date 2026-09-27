@@ -256,6 +256,97 @@ class RoadJudge:
         return count
 
 
+class BorderIndex:
+    """How far a point is from each surveyed border of a compiled track.
+
+    The judge above answers "on the road or off it"; this answers "how much
+    road was left" — the distance from the car's centre to the left border
+    and to the right one, which is what says whether a driver is using the
+    width of the circuit on the way in and on the way out (#115).
+
+    The same honesty rule applies: an unsurveyed edge is never measured. The
+    borders are polylines split at the gaps in the survey, and past the END
+    of one the road's edge carries on unrecorded — so a point is measured
+    against a border only where it is abeam of a surveyed stretch of it. A
+    point whose nearest border is the loose end of a polyline gets None, not
+    the distance to that end, which would read as metres of spare road the
+    survey never saw. Beyond NEAR_ROAD_M of any border the answer is None
+    too, and where the circuit crosses over itself a border on another level
+    is not a border of this road (#96).
+    """
+
+    def __init__(self, compiled: dict[str, Any]) -> None:
+        # (x1, z1, x2, z2, lowest y, highest y, start is a loose end, end is)
+        self._segments: dict[str, list[tuple[float, float, float, float,
+                                             float | None, float | None, bool, bool]]] = {}
+        self._cells: dict[str, dict[tuple[int, int], list[int]]] = {}
+        borders = compiled.get("borders") or {}
+        for side in ("L", "R"):
+            segments = self._segments.setdefault(side, [])
+            cells = self._cells.setdefault(side, {})
+            for line in borders.get(side) or []:
+                # A surveyed closure repeats the first vertex at the end: the
+                # loop has no loose ends.
+                closed = len(line) > 2 and line[0][:2] == line[-1][:2]
+                last = len(line) - 2
+                for k in range(len(line) - 1):
+                    a, b = line[k], line[k + 1]
+                    ys = [float(v[2]) for v in (a, b) if len(v) > 2 and v[2] is not None]
+                    x1, z1, x2, z2 = float(a[0]), float(a[1]), float(b[0]), float(b[1])
+                    segments.append((
+                        x1, z1, x2, z2,
+                        min(ys) if ys else None,
+                        max(ys) if ys else None,
+                        k == 0 and not closed,
+                        k == last and not closed,
+                    ))
+                    index = len(segments) - 1
+                    lo_x, hi_x = min(x1, x2) - NEAR_ROAD_M, max(x1, x2) + NEAR_ROAD_M
+                    lo_z, hi_z = min(z1, z2) - NEAR_ROAD_M, max(z1, z2) + NEAR_ROAD_M
+                    for gx in range(math.floor(lo_x / CELL_M), math.floor(hi_x / CELL_M) + 1):
+                        for gz in range(math.floor(lo_z / CELL_M), math.floor(hi_z / CELL_M) + 1):
+                            cells.setdefault((gx, gz), []).append(index)
+
+    def distance(self, side: str, x: float, z: float, y: float | None = None) -> float | None:
+        """Metres from (x, z) to the `side` border ("L" or "R"), or None
+        where the survey cannot say."""
+        segments = self._segments.get(side) or []
+        best = math.inf
+        best_loose = False
+        for i in self._cells.get(side, {}).get(
+            (math.floor(x / CELL_M), math.floor(z / CELL_M)), ()
+        ):
+            x1, z1, x2, z2, lo, hi, loose_start, loose_end = segments[i]
+            if y is not None and lo is not None and hi is not None and not (
+                lo - LEVEL_SEP_M <= y <= hi + LEVEL_SEP_M
+            ):
+                continue
+            dx, dz = x2 - x1, z2 - z1
+            seg2 = dx * dx + dz * dz
+            t = 0.0 if seg2 < 1e-12 else ((x - x1) * dx + (z - z1) * dz) / seg2
+            loose = (t < 0.0 and loose_start) or (t > 1.0 and loose_end)
+            t = max(0.0, min(1.0, t))
+            d = math.hypot(x1 + dx * t - x, z1 + dz * t - z)
+            if d < best:
+                best, best_loose = d, loose
+        if best > NEAR_ROAD_M or best_loose:
+            return None
+        return best
+
+
+def border_index_for_track(data_dir: Path, track: str) -> BorderIndex | None:
+    """The border index for a circuit, or None when it has no survey. Built
+    fresh each time (a few milliseconds): the one caller compiles a document
+    a session, not a verdict a lap."""
+    compiled = track_compile.for_track(data_dir, track)
+    if compiled is None:
+        return None
+    borders = compiled.get("borders") or {}
+    if not borders.get("L") and not borders.get("R"):
+        return None
+    return BorderIndex(compiled)
+
+
 def judge_for_track(data_dir: Path, track: str) -> RoadJudge | None:
     """The judge for a circuit, or None when its survey cannot support one.
 

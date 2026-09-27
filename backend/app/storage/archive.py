@@ -8,8 +8,15 @@ already accepts — plus a `session.json` saying what they belong to:
 
     gt7-session-12/
       session.json            format, version, the session row, a lap index
+      analysis.json           the lap analysis document (#115), when there is one
       laps/lap-001-345.json   lap number 1, lap id 345
       laps/lap-002-346.json
+
+`analysis.json` is the `gt7-datalogger-lap-analysis` document that
+GET /api/sessions/{id}/analysis.json serves: the session measured per corner
+against its best lap. It is derived from the laps beside it and nothing
+reads it back on import — it is there so that the archive is the whole
+session, the figures as well as the series they came from.
 
 The session row is the one GET /api/sessions lists: car, circuit, tags, note,
 the bests exclusion and the race result. Laps are named by number first so a
@@ -32,8 +39,16 @@ SESSION_FORMAT = "gt7-datalogger-session"
 SESSION_EXPORT_VERSION = 1
 
 
+ANALYSIS_FILE = "analysis.json"
+
+
 def archive_name(session_id: int) -> str:
     return f"gt7-session-{session_id}.zip"
+
+
+def analysis_name(session_id: int) -> str:
+    """What the lap analysis document is called when downloaded by itself."""
+    return f"gt7-session-{session_id}-analysis.json"
 
 
 def _write_lap(zf: zipfile.ZipFile, name: str, lap: dict[str, Any], samples_json: str) -> None:
@@ -51,8 +66,17 @@ def _write_lap(zf: zipfile.ZipFile, name: str, lap: dict[str, Any], samples_json
     )
 
 
-async def write_session_archive(repo: Repository, session_id: int, out: IO[bytes]) -> bool:
+async def write_session_archive(
+    repo: Repository,
+    session_id: int,
+    out: IO[bytes],
+    analysis: dict[str, Any] | None = None,
+) -> bool:
     """Write the session's archive to `out`. False when there is no such session.
+
+    `analysis` is the session's lap analysis document, compiled by the
+    caller (it needs the circuit's corners, which the repository knows
+    nothing of); None leaves the file out.
 
     Laps are read and written one at a time, so memory holds a single lap's
     samples however long the session ran; the compressed archive goes to
@@ -81,13 +105,19 @@ async def write_session_archive(repo: Repository, session_id: int, out: IO[bytes
                     "counts_for_best": lap["counts_for_best"],
                 }
             )
-        manifest = {
+        manifest: dict[str, Any] = {
             "format": SESSION_FORMAT,
             "version": SESSION_EXPORT_VERSION,
             "exported_at": datetime.now(UTC).isoformat(),
             "session": session,
             "laps": index,
         }
+        if analysis is not None:
+            zf.writestr(
+                f"{folder}/{ANALYSIS_FILE}",
+                json.dumps(analysis, ensure_ascii=False, separators=(",", ":")).encode(),
+            )
+            manifest["analysis"] = ANALYSIS_FILE
         zf.writestr(
             f"{folder}/session.json",
             json.dumps(manifest, ensure_ascii=False, indent=2).encode(),

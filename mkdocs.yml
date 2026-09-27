@@ -85,5 +85,6 @@ nav:
   - Reference:
       - REST & WebSocket API: reference/api.md
       - Lap file format: reference/lap-file-format.md
+      - Lap analysis format: reference/lap-analysis-format.md
       - Track bundle format: reference/track-bundle-format.md
       - Troubleshooting: reference/troubleshooting.md
