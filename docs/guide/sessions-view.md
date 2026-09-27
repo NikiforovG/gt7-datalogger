@@ -177,7 +177,10 @@ are tens of megabytes, with every number labelled. The same file is inside the
 session ZIP as `analysis.json`. See
 [Lap analysis format](../reference/lap-analysis-format.md).
 
-**Delete session** removes the session and all its laps.
+**Delete session** removes the session and all its laps. The session **being
+recorded** cannot be deleted — laps driven afterwards would be saved against a
+session that no longer exists — and the view says so if you try. It can be deleted
+once the next session has started.
 
 ## Header actions
 

@@ -36,8 +36,8 @@ from wall clocks or a fixed tick assumption:
 - `t += Δframes × 1/60` seconds, `dist += speed_mps × Δframes × 1/60` meters.
 
 Dropped datagrams therefore widen the time/distance steps instead of silently
-compressing the axes. The pid tracker also advances on paused/off-track packets, so
-unpausing sees a ~1-frame gap — pauses still add no lap time or distance. Frames
+compressing the axes. The pid tracker also advances on paused, off-track and loading
+packets, so resuming sees a ~1-frame gap — inactive frames add no lap time or distance. Frames
 lost in transit are counted and reported as `frames_dropped` in `/api/status` and
 the Admin diagnostics.
 
@@ -151,6 +151,20 @@ A **session** groups consecutive laps that belong together. A new session starts
   return to menu and back out), or
 - a lap was **[salvaged](#replay-salvage)** — the stream it came from broke off, so
   whatever streams next is a new stint.
+
+Car changes and counter resets are confirmed by **on-track, unpaused packets with
+a nonnegative lap number**. Inactive packets retain the last driving lap and its
+buffer: a temporary `6 → 0 → 6` during a pit interruption stays in one session,
+while a finished race's `12 → -1 → 1` through a menu starts a new session when
+driving resumes. Inactive packets alone never open an empty session. New sessions
+log the boundary reason, car, lap transition and packet ID.
+
+Two completion paths still accept inactive telemetry: the existing time-validated
+[replay salvage](#replay-salvage), and an unpaused final-lap `+1` step from the same
+car. The latter records the race result even if the finish packet has already cleared
+the on-track flag; saving the final lap still requires a positive reported time and
+enough buffered samples. Retaining a buffer does not restore samples missing during an
+interruption; the normal partial-lap checks still apply.
 
 When a new session starts, the previous one is closed first:
 

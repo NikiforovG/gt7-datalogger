@@ -62,7 +62,16 @@ async def sessions(
 
 @router.delete("/sessions/{session_id}", dependencies=[Depends(require_admin)])
 async def delete_session(request: Request, session_id: int) -> dict[str, str]:
-    await svc(request).repo.delete_session(session_id)
+    service = svc(request)
+    async with service.session_lock:
+        # Pausing recording does not release this ID: the next packet still
+        # writes to it. Keep the session row until the recorder has moved on.
+        if session_id == service.session_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot delete the current session. Start a new session first.",
+            )
+        await service.repo.delete_session(session_id)
     return {"status": "deleted"}
 
 
