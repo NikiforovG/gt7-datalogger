@@ -7,6 +7,33 @@ Notable changes to GT7 Datalogger. The format follows
 
 ### Fixed
 
+- **Menus, pit stops and pauses no longer merge or split sessions.** (#120,
+  contributed by @NikiforovG) GT7 keeps streaming while the car is not being
+  driven, and those packets carry lap counters of their own: 0 or -1 in a
+  menu, 0 in the pits. The lap processor read them as it read driving. A
+  race that ended at lap 12 and went through a menu at -1 left the counter
+  parked there, so the next race's lap 1 was not seen as a reset and the two
+  races were recorded as one session; a pit interruption that read
+  `6 → 0 → 6` was seen as a reset and split one race in two. A car change or
+  a lap reset is now confirmed only by a packet that is on track, unpaused
+  and has a lap number of 0 or more. Inactive packets keep the last driving
+  lap and its buffer, and never open a session by themselves. Two ways of
+  finishing a lap still accept them: the time-validated replay salvage, and
+  the final lap's `+1` step from the same car, which records the race result
+  even when the finishing packet has already cleared the on-track flag. The
+  packet counter is followed through loading screens as well, so their
+  frames add nothing to the lap clock. A new session logs why it began.
+- **The session being recorded cannot be deleted from under the recorder.**
+  (#121, contributed by @NikiforovG) Deleting the current session removed its
+  row while the recorder kept its id: laps driven afterwards were saved
+  against a session that no longer existed, and a race's finishing result
+  was lost without a word. `DELETE /api/sessions/{id}` now answers **409**
+  for the recorder's current session, paused or not, and the Sessions view
+  says why. The check is serialized with session creation, so a session
+  cannot be deleted in the moment between its row being committed and the
+  recorder adopting its id. Every other session deletes as before. The
+  current session becomes deletable once the next one has started, or after
+  a restart.
 - **Analysis no longer shows the previous session under a new session's
   name.** Picking a session with no completed lap yet from the Analysis
   dropdown — which is every session until its first lap is finished, so
