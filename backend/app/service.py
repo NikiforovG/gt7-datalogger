@@ -102,6 +102,9 @@ class TelemetryService:
 
         self.recording = True
         self.session_id: int | None = None
+        # Serialize session creation and API deletion: the database commit
+        # can expose a new row before session_id is assigned below.
+        self.session_lock = asyncio.Lock()
         self.track_name: str = ""
         self.latest_packet: TelemetryPacket | None = None
         self.notifier = Notifier()
@@ -415,8 +418,9 @@ class TelemetryService:
 
     async def _on_session(self, info: SessionInfo) -> None:
         self.event_watcher.reset()
-        await self._close_previous_session()
-        self.session_id = await self.repo.create_session(info, self.cars.get(info.car_id))
+        async with self.session_lock:
+            await self._close_previous_session()
+            self.session_id = await self.repo.create_session(info, self.cars.get(info.car_id))
         car = self.cars.name(info.car_id)
         self.sync.sessions.session_started(
             self.session_id,
