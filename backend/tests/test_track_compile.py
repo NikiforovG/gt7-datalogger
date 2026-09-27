@@ -657,3 +657,217 @@ def test_for_track_recompiles_when_the_corrections_change(tmp_path) -> None:
     track_compile._CACHE.clear()
     broken = track_compile.for_track(tmp_path, track)
     assert broken is not None and broken["corrections"] is None
+
+
+# --- a hand mark is the border ------------------------------------------------
+
+
+def _marked_and_traced(offset=1.1, length=300, aside=0.0):
+    """A straight left border marked by hand every metre, AND traced by the
+    straddle tracer `offset` metres off it — the two readings of one kerb the
+    shared bundles carry wherever a driver marked it. A plain automatic right
+    border sits a road away."""
+    edges = []
+    for i in range(length):
+        edges.append(_edge(float(i), 0.0, 1.0, 0.0, "L", kind="edge", y=0.0))
+        edges.append(_edge(i + aside, offset, 1.0, 0.0, "L", kind="straddle", y=0.0))
+        edges.append(_edge(float(i), -10.0, 1.0, 0.0, "R", kind="straddle", y=0.0))
+    return edges
+
+
+def _main_gaps(edges):
+    """Gaps in each side's MAIN chain — holes in the border itself, which is
+    what a driver sees; a gap inside a leftover piece is not one."""
+    out = {}
+    for side in "LR":
+        assembly = track_compile.SideAssembly([e for e in edges if e["side"] == side])
+        chain = assembly.chains[0]
+        out[side] = sum(
+            track_compile._seg_len(assembly.pts[a], assembly.pts[b])
+            > track_compile.SURVEYED_MAX_SPACING_M
+            for a, b in zip(chain, chain[1:], strict=False)
+        )
+    return out
+
+
+def _lago_slice():
+    return json.loads(
+        (Path(__file__).parent / "data" / "lago_maggiore_marked_and_traced.json")
+        .read_text(encoding="utf-8")
+    )
+
+
+def test_a_kerb_marked_by_hand_and_traced_is_drawn_once(monkeypatch) -> None:
+    doc = _document(_marked_and_traced())
+    compiled = track_compile.compile_bundle(doc)
+    assert len(compiled["borders"]["L"]) == 1
+    assert compiled["gaps"]["L"] == []
+    # Every traced record beside the mark gave way, and the plain automatic
+    # border across the road did not.
+    assert compiled["source"]["superseded"] == 300
+    assert len(compiled["borders"]["R"]) == 1
+
+    # Read as it was, the same evidence draws two parallel borders: the stray
+    # line beside the kerb.
+    monkeypatch.setattr(track_compile, "prefer_marked", lambda edges: (edges, 0))
+    monkeypatch.setattr(track_compile, "prune_pieces", lambda left, right: {})
+    assert len(track_compile.compile_bundle(doc)["borders"]["L"]) == 2
+
+
+def test_the_real_lago_maggiore_border_no_longer_breaks() -> None:
+    doc = _lago_slice()
+    # The failure this exists for: the walk zigzags between two readings of
+    # one kerb, ~1.1 m apart, and the border itself breaks — with records all
+    # through every hole.
+    assert sum(_main_gaps(doc["edges"]).values()) >= 3
+    kept, superseded = track_compile.prefer_marked(doc["edges"])
+    assert superseded > 0
+    assert _main_gaps(kept) == {"L": 0, "R": 0}
+
+
+def test_only_a_record_beside_the_mark_gives_way() -> None:
+    kept, superseded = track_compile.prefer_marked([
+        _edge(0.0, 0.0, 1.0, 0.0, "L", kind="edge"),
+        _edge(1.5, 0.1, 1.0, 0.0, "L", kind="straddle"),  # in line: the border continuing
+        _edge(0.5, 1.1, 1.0, 0.0, "L", kind="straddle"),  # beside it: the second reading
+        _edge(0.5, 1.1, 1.0, 0.0, "R", kind="auto"),  # beside it, but the other border
+        _edge(0.0, 4.0, 1.0, 0.0, "L", kind="auto"),  # too far to be the same kerb
+    ])
+    assert superseded == 1
+    assert [(e["x"], e["z"], e["side"]) for e in kept] == [
+        (0.0, 0.0, "L"), (1.5, 0.1, "L"), (0.5, 1.1, "R"), (0.0, 4.0, "L"),
+    ]
+
+
+def test_a_mark_on_the_deck_above_does_not_take_the_road_below() -> None:
+    kept, superseded = track_compile.prefer_marked([
+        _edge(0.0, 0.0, 1.0, 0.0, "L", kind="wall", y=8.0),
+        _edge(0.0, 1.0, 1.0, 0.0, "L", kind="straddle", y=0.0),
+    ])
+    assert superseded == 0
+    assert len(kept) == 2
+
+
+def test_automatic_evidence_alone_is_compiled_as_it_always_was() -> None:
+    compiled = track_compile.compile_bundle(_document(_ring()))
+    assert compiled["source"]["superseded"] == 0
+    assert compiled["source"]["pieces_dropped"] == {
+        "duplicate": 0, "wrong_side": 0, "across_road": 0, "stray": 0,
+    }
+    assert compiled["gaps"] == {"L": [], "R": []}
+
+
+def test_the_preference_reads_the_bundle_and_never_edits_it() -> None:
+    doc = _document(_marked_and_traced(length=40))
+    before = json.dumps(doc, sort_keys=True)
+    track_compile.compile_bundle(doc)
+    assert json.dumps(doc, sort_keys=True) == before
+
+
+# --- leftover pieces that only repeat a border ---------------------------------
+
+
+def _line(side, kind, x0, z0, x1, z1, step=1.0, hx=1.0, hz=0.0):
+    n = int(math.hypot(x1 - x0, z1 - z0) / step)
+    return [_edge(x0 + (x1 - x0) * i / n, z0 + (z1 - z0) * i / n, hx, hz, side, kind=kind)
+            for i in range(n + 1)]
+
+
+def _road(length=400, width=12.0):
+    """A straight road, automatic borders on both sides, `width` apart."""
+    return (_line("L", "straddle", 0, 0, length, 0)
+            + _line("R", "straddle", 0, -width, length, -width))
+
+
+def _pieces(edges):
+    left = track_compile.SideAssembly([e for e in edges if e["side"] == "L"])
+    right = track_compile.SideAssembly([e for e in edges if e["side"] == "R"])
+    dropped = track_compile.prune_pieces(left, right)
+    return dropped, len(left.chains) - 1, len(right.chains) - 1
+
+
+def test_a_second_pass_drawn_on_top_of_a_border_is_not_drawn_again() -> None:
+    # Offset far enough that the walk keeps it apart, close enough to be the
+    # same kerb.
+    edges = _road() + _line("L", "auto", 100, 2.5, 160, 2.5, step=1.3)
+    dropped, left_pieces, _ = _pieces(edges)
+    assert dropped["duplicate"] == 1
+    assert left_pieces == 0
+
+
+def test_an_automatic_piece_lying_on_the_other_border_is_not_drawn() -> None:
+    # Left-side records sitting on the right-hand kerb: a car rejoining from
+    # paved run-off, which the game reports as tarmac.
+    edges = _road() + _line("L", "auto", 150, -12.3, 230, -12.3)
+    dropped, left_pieces, _ = _pieces(edges)
+    assert dropped["wrong_side"] == 1
+    assert left_pieces == 0
+
+    # A driver's own mark is not called a wrong-side reading: that is a fault
+    # of the automatic side test. It is still across the road, though, and a
+    # left border cannot be there.
+    marked = _road() + _line("L", "wall", 150, -12.3, 230, -12.3)
+    dropped, left_pieces, _ = _pieces(marked)
+    assert dropped["wrong_side"] == 0
+    assert dropped["across_road"] == 1
+    assert left_pieces == 0
+
+
+def _drift(x0, z0, length, degrees, side="L", kind="straddle"):
+    angle = math.radians(degrees)
+    return _line(side, kind, x0, z0, x0 + length * math.cos(angle), z0 + length * math.sin(angle),
+                 hx=math.cos(angle), hz=math.sin(angle))
+
+
+def test_a_short_stray_off_a_whole_border_is_not_drawn() -> None:
+    # Kyoto's corner, in miniature: one lap's wheels leave the kerb at a shallow
+    # angle and drift ~9 m off it over 50 m, away from the road.
+    edges = _road() + _drift(200, 2.0, 50, 10)
+    dropped, left_pieces, _ = _pieces(edges)
+    assert dropped["stray"] == 1
+    assert left_pieces == 0
+
+
+def test_a_stray_that_starts_nowhere_near_the_border_is_not_drawn_either() -> None:
+    # Autopolis's hairpin: a short automatic piece out on the verge, touching
+    # no border at all, with the border it belongs to whole beside it.
+    edges = _road() + _line("L", "auto", 150, 20, 170, 20)
+    dropped, left_pieces, _ = _pieces(edges)
+    assert dropped["stray"] == 1
+    assert left_pieces == 0
+
+
+def test_a_piece_across_the_road_is_not_drawn_even_when_marked_by_hand() -> None:
+    # High Speed Ring's straight: a run-off line marked for the left side, most
+    # of it lying on the right half of the road. No left border can be there.
+    edges = _road() + _line("L", "runoff", 150, -9.0, 200, -9.0)
+    dropped, left_pieces, _ = _pieces(edges)
+    assert dropped["across_road"] == 1
+    assert left_pieces == 0
+
+
+def test_a_long_piece_is_never_judged() -> None:
+    # A border that is simply not the main chain — BB Raceway's left side —
+    # is not a stray line, however it lies.
+    edges = _road(length=800) + _line("L", "wall", 300, -9.0, 500, -9.0)
+    dropped, left_pieces, _ = _pieces(edges)
+    assert dropped == {"duplicate": 0, "wrong_side": 0, "across_road": 0, "stray": 0}
+    assert left_pieces == 1
+
+
+def test_a_piece_along_a_hole_in_the_border_is_left_for_a_person() -> None:
+    # The border has a hole, and an automatic piece runs along it a few metres
+    # off. It may be the border itself; a rule is not the one to say.
+    road = [e for e in _road() if not (e["side"] == "L" and 180 < e["x"] < 240)]
+    edges = road + _line("L", "auto", 185, 4.0, 235, 4.0)
+    dropped, _, _ = _pieces(edges)
+    assert dropped == {"duplicate": 0, "wrong_side": 0, "across_road": 0, "stray": 0}
+
+
+def test_a_piece_where_the_border_has_nothing_is_drawn() -> None:
+    # The main border stops; a separate automatic piece carries on elsewhere.
+    # It repeats nothing, so it stays.
+    edges = _road() + _line("L", "auto", 600, 0, 700, 0)
+    dropped, left_pieces, _ = _pieces(edges)
+    assert dropped == {"duplicate": 0, "wrong_side": 0, "across_road": 0, "stray": 0}
+    assert left_pieces == 1
