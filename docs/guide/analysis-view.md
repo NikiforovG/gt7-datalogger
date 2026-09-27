@@ -25,6 +25,11 @@ out-lap or an excluded lap is never the default reference — and keeps followin
 new laps arrive live — useful on a second screen while driving. Any manual change pins
 your selection.
 
+A session with **no completed lap yet** — the one you have only just started driving
+— says so in place of the map, and fills in by itself the moment its first lap is
+finished. Changing session always starts from that session's own laps: nothing
+selected for the one you were looking at comes along.
+
 !!! note "Same circuit only"
     Every chart's x-axis is the **reference lap's** distance from the start line, and
     every other lap is placed on it by where it was on track — which works across

@@ -24,6 +24,7 @@ import { LargeDialog } from "@/components/ui/Dialog";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import { Select } from "@/components/ui/Select";
 import { Tip } from "@/components/ui/Tooltip";
+import { quickestCounting, resolveReference, resolveSelected } from "@/lib/analysisSelection";
 import { api } from "@/lib/api";
 import {
   CHANNEL_BY_KEY,
@@ -89,11 +90,6 @@ const PLAYBACK_COLUMNS = [
 /** The session's default reference: its quickest lap that counts. A pit
  *  out-lap's short "time", or a lap the driver excluded (#74), is no
  *  yardstick — unless nothing else is left. */
-function quickestCounting(laps: LapSummary[]): LapSummary | undefined {
-  const counting = laps.filter((l) => l.counts_for_best !== false);
-  return [...(counting.length > 0 ? counting : laps)].sort((a, b) => a.time_ms - b.time_ms)[0];
-}
-
 export function AnalysisView({ request }: { request: AnalysisRequest }) {
   const units = useSettings((s) => s.units);
   const mapFollow = useSettings((s) => s.mapFollow);
@@ -103,6 +99,7 @@ export function AnalysisView({ request }: { request: AnalysisRequest }) {
   const mapLayers = useSettings((s) => s.mapLayers);
   const setMapLayer = useSettings((s) => s.setMapLayer);
   const lapEpoch = useTelemetry((s) => s.lapEpoch);
+  const recordingSessionId = useTelemetry((s) => s.status?.session_id ?? null);
 
   // Seed from the shared selection so switching tabs doesn't reset the view.
   // Exception: a session-only navigation ("Analyze" on a DIFFERENT session)
@@ -162,6 +159,26 @@ export function AnalysisView({ request }: { request: AnalysisRequest }) {
         (request.ref ?? stored.refLapId) != null),
   );
 
+  // Leaving a session takes everything that was showing of it along: the
+  // selection, the reference, the guests and the session's own lap list.
+  // What is selected is otherwise read, under the next session's title, as a
+  // set of guest laps from another session — which is a feature (#26), and
+  // so nothing downstream questions it. Bumping the epoch reloads the laps
+  // even when the "next" session is the one already open.
+  const [sessionEpoch, setSessionEpoch] = useState(0);
+  const leaveSession = useCallback(() => {
+    manualSelection.current = false;
+    // A guest fetch started under the old session must not land its lap as
+    // a guest of the new one.
+    pendingGuestIds.current.clear();
+    setSelected([]);
+    setRefLap(null);
+    setGuests([]);
+    setLaps([]);
+    setLapsFor(null);
+    setSessionEpoch((n) => n + 1);
+  }, []);
+
   // Apply a new deep link while the view is mounted (pasted URL).
   const requestKey = `${request.session ?? ""}|${(request.laps ?? []).join(",")}|${request.ref ?? ""}|${(request.channels ?? []).join(",")}`;
   const firstRequest = useRef(true);
@@ -184,11 +201,7 @@ export function AnalysisView({ request }: { request: AnalysisRequest }) {
       // selection belongs to whatever was open before and must not ride
       // along into the new session as guests — nor may an in-flight guest
       // fetch it started land after the switch.
-      manualSelection.current = false;
-      pendingGuestIds.current.clear();
-      setSelected([]);
-      setRefLap(null);
-      setGuests([]);
+      leaveSession();
     }
     if (request.channels != null) {
       setChannelKeys(request.channels.filter((k) => k in CHANNEL_BY_KEY));
@@ -209,16 +222,18 @@ export function AnalysisView({ request }: { request: AnalysisRequest }) {
   // Load laps for the chosen session.
   useEffect(() => {
     if (sessionId == null) return;
+    // A reply for a session that is no longer the one open is dropped: the
+    // replies to two quick switches can arrive in either order, and the
+    // slower one must not put its session's laps under the other's title.
+    let live = true;
     api.sessionLaps(sessionId).then((all) => {
+      if (!live) return;
       // Laps without samples (phantoms from menu/replay flicker in old
       // recordings) have nothing to chart — keep them out of the picker.
       // Unknown tick counts are treated as empty, not as chartable.
-      const ls = all.filter((lap) => (lap.total_ticks ?? 0) > 0);
+      const ls = all.filter((lap) => (lap.total_ticks ?? 0) > 0); // newest first
       setLaps(ls);
       setLapsFor(sessionId);
-      if (ls.length === 0) return;
-      const best = quickestCounting(ls)!;
-      const latest = ls[0]; // list is newest-first
       // A selected id missing from this session's laps is not necessarily
       // stale: it may be a guest from another session, or a cross-session
       // deep link (#/analysis?session=A&laps=idFromB) the resolver below has
@@ -228,17 +243,20 @@ export function AnalysisView({ request }: { request: AnalysisRequest }) {
         ls.some((l) => l.id === id) ||
         guestsRef.current.some((g) => g.id === id) ||
         !failedGuestIds.current.has(id);
+      // A session with no laps resolves too — to nothing (see
+      // lib/analysisSelection). Returning early here is what used to leave
+      // the previous session's laps on screen under this one's title.
+      const rule = { laps: ls, manual: manualSelection.current, keep };
       setSelected((cur) => {
-        const stillValid = cur.filter(keep);
-        return manualSelection.current && stillValid.length > 0
-          ? stillValid
-          : [...new Set([latest.id, best.id])];
+        const next = resolveSelected(cur, rule);
+        return cur.length === 0 && next.length === 0 ? cur : next;
       });
-      setRefLap((cur) =>
-        manualSelection.current && cur != null && keep(cur) ? cur : best.id,
-      );
-    }).catch(() => setError("Could not load laps"));
-  }, [sessionId, lapEpoch]);
+      setRefLap((cur) => resolveReference(cur, rule));
+    }).catch(() => live && setError("Could not load laps"));
+    return () => {
+      live = false;
+    };
+  }, [sessionId, lapEpoch, sessionEpoch]);
 
   // Resolve any selected id (or reference) that belongs to no loaded list
   // into a guest. This is what makes cross-session deep links
@@ -295,15 +313,23 @@ export function AnalysisView({ request }: { request: AnalysisRequest }) {
   // Publish the resolved selection: shared store (tab switches) + URL (sharing).
   const setSharedSelection = useAnalysisSelection((s) => s.setSelection);
   useEffect(() => {
-    if (sessionId == null || refLap == null || selected.length === 0) return;
+    if (sessionId == null) return;
+    const channels = isDefaultChannelSet(channelKeys) ? undefined : channelKeys;
+    if (refLap == null || selected.length === 0) {
+      // Nothing to compare. Once the session's laps have loaded and there
+      // are none, that IS the selection — published so that the address bar
+      // and the next visit to this tab name this session and no laps, rather
+      // than keeping the last session's.
+      const settled =
+        lapsFor === sessionId && laps.length === 0 && selected.length === 0 && refLap == null;
+      if (!settled) return;
+      setSharedSelection({ sessionId, selectedLapIds: [], refLapId: null });
+      reflectAnalysisSelection({ session: sessionId, channels });
+      return;
+    }
     setSharedSelection({ sessionId, selectedLapIds: selected, refLapId: refLap });
-    reflectAnalysisSelection({
-      session: sessionId,
-      laps: selected,
-      ref: refLap,
-      channels: isDefaultChannelSet(channelKeys) ? undefined : channelKeys,
-    });
-  }, [sessionId, selected, refLap, channelKeys, setSharedSelection]);
+    reflectAnalysisSelection({ session: sessionId, laps: selected, ref: refLap, channels });
+  }, [sessionId, selected, refLap, laps, lapsFor, channelKeys, setSharedSelection]);
 
   // Fetch comparison + deviation when the selection or channel set changes.
   // The request always carries the per-corner columns for the Corner Detail
@@ -335,9 +361,23 @@ export function AnalysisView({ request }: { request: AnalysisRequest }) {
       .finally(() => setLoading(false));
   }, [selected, refLap, requestColumns]);
 
+  // Cleared when the SESSION changes, so one session's consistency chart is
+  // never drawn under another's laps, but not when a lap arrives: the chart
+  // would blink on every lap of the session being driven.
+  const deviationFor = useRef<number | null>(null);
   useEffect(() => {
     if (sessionId == null) return;
-    api.deviation(sessionId).then(setDeviation).catch(() => setDeviation(null));
+    if (deviationFor.current !== sessionId) {
+      deviationFor.current = sessionId;
+      setDeviation(null);
+    }
+    let live = true;
+    api.deviation(sessionId)
+      .then((d) => live && setDeviation(d))
+      .catch(() => live && setDeviation(null));
+    return () => {
+      live = false;
+    };
   }, [sessionId, lapEpoch]);
 
   // The engineer's post-lap notes for the whole session (#23). Cleared before
@@ -437,6 +477,10 @@ export function AnalysisView({ request }: { request: AnalysisRequest }) {
   const refSummary =
     laps.find((l) => l.id === refLap) ?? guests.find((l) => l.id === refLap);
   const session = sessions?.find((s) => s.id === sessionId) ?? null;
+  // The open session's laps have loaded and there are none, and nothing from
+  // another session was asked for either.
+  const sessionEmpty =
+    lapsFor === sessionId && laps.length === 0 && selected.length === 0 && guests.length === 0;
 
   // Category best at this circuit (#19): a lap is worth judging against the
   // fastest one ever set here IN THE SAME CLASS — a Gr.3 time and an N100
@@ -718,10 +762,7 @@ export function AnalysisView({ request }: { request: AnalysisRequest }) {
           ariaLabel="Session"
           value={String(sessionId ?? "")}
           onValueChange={(v) => {
-            manualSelection.current = false;
-            // A guest fetch started under the old session must not land
-            // its lap as a guest of the new one.
-            pendingGuestIds.current.clear();
+            leaveSession();
             setSessionId(Number(v));
           }}
           options={sessions.map((s) => ({
@@ -823,6 +864,19 @@ export function AnalysisView({ request }: { request: AnalysisRequest }) {
 
       {error && <div className="rounded-md bg-brake/10 p-2 text-sm text-brake">{error}</div>}
       {loading && !compare && <div className="skeleton h-[380px]" />}
+      {sessionEmpty && (
+        <div
+          role="status"
+          className="flex h-64 flex-col items-center justify-center gap-1 rounded-panel border border-edge px-4 text-center text-ink-dim"
+        >
+          <div className="text-lg">No completed laps in this session yet</div>
+          <div className="text-sm">
+            {recordingSessionId === sessionId
+              ? "It is being recorded now — each lap appears here as soon as it is finished."
+              : "Nothing in it was recorded as a lap, so there is nothing to chart."}
+          </div>
+        </div>
+      )}
 
       {/* 3 — race line map hero */}
       {refEntry && (
