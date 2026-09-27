@@ -69,8 +69,8 @@ COMPILED_FORMAT = "gt7-datalogger-track-compiled"
 #    says what they took out and drew in.
 # 5: an automatic record beside a hand-marked one on the same side is set
 #    aside (MARKED_WINS_M), and `source.superseded` counts how many were;
-#    leftover pieces that only repeat a border are not drawn (prune_pieces),
-#    and `source.pieces_dropped` counts those.
+#    leftover pieces that only draw lines that are not there are dropped
+#    (prune_pieces), and `source.pieces_dropped` counts them by kind.
 # Bumping it is what recompiles every stored document once — the bundle files
 # themselves did not change, so the identity check alone would keep serving
 # geometry that walks across levels.
@@ -494,30 +494,37 @@ def smooth_run(
 
 # --- leftover pieces that only repeat a border ----------------------------------
 # Whatever the walk and the stitch could not join to a side's main chain is
-# drawn as a piece of its own. Most such pieces are real — a pit wall, a
-# stretch the main chain has a gap across — but three kinds say nothing the
-# main chains do not, and draw lines that are not there:
+# drawn as a piece of its own. Some such pieces are real — a pit wall, the
+# border itself where the main chain has a hole — but four kinds only draw
+# lines that are not there:
 #
 #  - a DUPLICATE: a second pass over the same border, drawn on top of it.
-#    Measured over the 26 shared circuits: 100 pieces, 3.4 km.
 #  - a WRONG-SIDE piece: automatic records lying on the OTHER side's border —
 #    a car rejoining from paved run-off, which GT7 reports as tarmac, fools
-#    the side test in the survey. 10 pieces, 0.5 km. Hand-marked records
-#    carry the driver's own word for the side and are never judged this way.
-#  - a SPUR: an automatic piece that leaves the border and drifts off it —
-#    one lap's off-side wheels following something that is not the kerb.
-#    Only a short one that starts at the border and stays near it, and only
-#    where the border it leaves has no gap nearby: an automatic piece near a
-#    gap may be the border itself, and is kept for a person to judge.
+#    the side test in the survey.
+#  - an ACROSS-THE-ROAD piece: a short piece lying mostly nearer the other
+#    side's border than its own. No border of this side can be there. This
+#    one is judged whoever recorded it — a hand mark armed on the wrong side,
+#    or left armed while the car crossed the road, is still in the wrong
+#    place.
+#  - a STRAY: a short automatic piece near a border that exists, which does
+#    not run along a hole in it — one lap's wheels following something that
+#    is not the kerb, off onto a verge or round a spin.
+#
+# Two things are never judged, whatever they look like: a piece that runs
+# along a hole in its side's main border (it may be the border itself, and
+# is for a person to decide), and a long piece (a border that happens not to
+# be the main chain — BB Raceway's left side is one).
 #
 # A dropped piece is not drawn and not counted as surveyed — a duplicate
 # counted twice was inflating coverage. The evidence is untouched.
 PIECE_NEAR_M = 3.0  # a duplicate lies this close to its own main chain…
 PIECE_NEAR_SHARE = 0.9  # …over this share of its records
 WRONG_SIDE_M = 2.0  # a wrong-side piece lies this close to the other side's
-SPUR_MAX_M = 120.0  # longest spur dropped
-SPUR_DRIFT_M = 12.0  # farthest a spur strays from the border it leaves
-SPUR_GAP_CLEAR_M = 15.0  # no gap of its own side within this of it
+PIECE_JUDGED_MAX_M = 120.0  # longest piece judged across-the-road or stray
+STRAY_REACH_M = 35.0  # a stray stays within this of its own main chain
+HOLE_ALONG_M = 5.0  # a record this close to a hole's span runs along it
+HOLE_ALONG_SHARE = 0.5  # a piece this much along a hole is left alone
 
 
 class _Line:
@@ -560,31 +567,58 @@ def _automatic(side: SideAssembly, chain: list[int]) -> bool:
     return all(side.pts[i]["kind"] not in track_bundle.MANUAL_KINDS for i in chain)
 
 
+def _holes(side: SideAssembly) -> list[tuple[float, float, float, float]]:
+    """The gap spans of a side's MAIN chain, its closure included."""
+    chain = side.chains[0]
+    ends = list(zip(chain, chain[1:], strict=False))
+    if side.closed:
+        ends.append((chain[-1], chain[0]))
+    out = []
+    for a, b in ends:
+        pa, pb = side.pts[a], side.pts[b]
+        if _seg_len(pa, pb) > SURVEYED_MAX_SPACING_M:
+            out.append((pa["x"], pa["z"], pb["x"], pb["z"]))
+    return out
+
+
+def _to_span(x: float, z: float, span: tuple[float, float, float, float]) -> float:
+    x1, z1, x2, z2 = span
+    dx, dz = x2 - x1, z2 - z1
+    length2 = dx * dx + dz * dz
+    t = 0.0 if length2 <= 0 else max(0.0, min(1.0, ((x - x1) * dx + (z - z1) * dz) / length2))
+    return math.hypot(x - x1 - t * dx, z - z1 - t * dz)
+
+
 def _piece_kind(
     side: SideAssembly, chain: list[int], own: _Line, other: _Line | None
 ) -> str | None:
-    """'duplicate', 'wrong_side', 'spur', or None for a piece that is drawn."""
+    """'duplicate', 'wrong_side', 'across_road', 'stray', or None for a piece
+    that is drawn."""
     pts = [(side.pts[i]["x"], side.pts[i]["z"]) for i in chain]
-    near_own = [own.distance(x, z, max(PIECE_NEAR_M, SPUR_DRIFT_M)) for x, z in pts]
-    share = sum(d <= PIECE_NEAR_M for d in near_own) / len(pts)
-    if share >= PIECE_NEAR_SHARE:
+    near_own = [own.distance(x, z, STRAY_REACH_M) for x, z in pts]
+    if sum(d <= PIECE_NEAR_M for d in near_own) / len(pts) >= PIECE_NEAR_SHARE:
         return "duplicate"
-    if not _automatic(side, chain):
+    automatic = _automatic(side, chain)
+    near_other = (
+        [other.distance(x, z, STRAY_REACH_M) for x, z in pts] if other is not None
+        else [math.inf] * len(pts)
+    )
+    if automatic and sum(d <= WRONG_SIDE_M for d in near_other) / len(pts) >= PIECE_NEAR_SHARE:
+        return "wrong_side"
+    if side._length(chain) > PIECE_JUDGED_MAX_M:
         return None
-    if other is not None:
-        on_other = sum(other.distance(x, z, WRONG_SIDE_M) <= WRONG_SIDE_M for x, z in pts)
-        if on_other / len(pts) >= PIECE_NEAR_SHARE:
-            return "wrong_side"
-    if (
-        side._length(chain) <= SPUR_MAX_M
-        and min(near_own[0], near_own[-1]) <= PIECE_NEAR_M
-        and max(near_own) <= SPUR_DRIFT_M
-    ):
-        for gx1, gz1, gx2, gz2 in side.gap_spans():
-            mx, mz = (gx1 + gx2) / 2, (gz1 + gz2) / 2
-            if any(math.hypot(mx - x, mz - z) <= SPUR_GAP_CLEAR_M for x, z in pts):
-                return None
-        return "spur"
+    for span in _holes(side):
+        along = sum(_to_span(x, z, span) <= HOLE_ALONG_M for x, z in pts)
+        if along / len(pts) >= HOLE_ALONG_SHARE:
+            return None
+    across = sum(
+        1 for mine, theirs in zip(near_own, near_other, strict=True)
+        if mine != math.inf and theirs < mine
+    )
+    if across / len(pts) >= 0.5:
+        return "across_road"
+    if automatic and max(near_own) <= STRAY_REACH_M:
+        return "stray"
     return None
 
 
@@ -598,7 +632,7 @@ def prune_pieces(left: SideAssembly, right: SideAssembly) -> dict[str, int]:
         id(side): _Line(side, side.chains[0]) if side.chains else None
         for side in (left, right)
     }
-    dropped = {"duplicate": 0, "wrong_side": 0, "spur": 0}
+    dropped = {"duplicate": 0, "wrong_side": 0, "across_road": 0, "stray": 0}
     verdicts: list[tuple[SideAssembly, list[list[int]]]] = []
     for side, other in ((left, right), (right, left)):
         own = lines[id(side)]
@@ -1071,8 +1105,8 @@ def compile_bundle(
             # Automatic records set aside for a hand mark beside them
             # (prefer_marked): read, and not drawn.
             "superseded": superseded,
-            # Leftover border pieces not drawn because they only repeat a
-            # border, by what they were (prune_pieces).
+            # Leftover border pieces not drawn, by what they were
+            # (prune_pieces).
             "pieces_dropped": pieces_dropped,
             "bundle_updated_at": meta["updated_at"],
             "app_version": _app_version(),
