@@ -67,11 +67,76 @@ COMPILED_FORMAT = "gt7-datalogger-track-compiled"
 # 3: smoothed borders, and the `smoothing` key that says whether they are.
 # 4: the shared repo's corrections applied, and the `corrections` key that
 #    says what they took out and drew in.
+# 5: an automatic record beside a hand-marked one on the same side is set
+#    aside (MARKED_WINS_M), and `source.superseded` counts how many were.
 # Bumping it is what recompiles every stored document once — the bundle files
 # themselves did not change, so the identity check alone would keep serving
 # geometry that walks across levels.
-COMPILED_VERSION = 4
+COMPILED_VERSION = 5
 COMPILED_DIR = "compiled"  # under track-bundles/
+
+# --- which evidence draws a border ---------------------------------------------
+# A kerb the driver marked by hand is often ALSO traced by the straddle
+# tracer and the surface transitions, and the two do not agree on where it
+# is: the automatic kinds sit on the off-side wheel line, the hand mark on the
+# car's own, and on the shared bundles the two lines run ~1.1 m apart. The
+# walk below steps within a 5 m radius, so over a stretch carrying both it
+# zigzags between two parallel lines and breaks — measured on Lago Maggiore
+# Full Course, 83 of its 85 gaps had records all through them, 2 m apart and
+# heading true. So where a hand mark exists, it is the border: an automatic
+# record on the same side within this distance of one is set aside before
+# anything is ordered. Only a record BESIDE the mark — at least
+# MARKED_ASIDE_M across the mark's own heading — gives way; one in line with
+# it is the same border continuing, and at Fuji it is what joins a marked
+# edge to the marked run-off after it. Automatic evidence everywhere else —
+# most of every circuit, and all of some — is untouched, and so are the
+# votes: this is a reading of the bundle, never an edit of it.
+#
+# Measured over the 26 shared circuits with their corrections: flagged gaps
+# 309 -> 212 and gap metres 4718 -> 2951, Lago Maggiore Full Course 85 -> 2;
+# two circuits gain one short gap each. Without the "beside" test it was 219,
+# with six circuits worse; 0.7 m across keeps too much of the parallel line
+# (221), and 3 m round starts taking the only evidence round a corner a mark
+# merely passed near.
+MARKED_WINS_M = 2.5
+MARKED_ASIDE_M = 0.5
+
+
+def prefer_marked(edges: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """The records that draw the borders, and how many automatic ones gave way.
+
+    One side at a time, and only ever in favour of a hand-marked kind on the
+    SAME side: a wall marked on the left says nothing about the right-hand
+    kerb across the road.
+    """
+    cell = MARKED_WINS_M
+    marked: dict[tuple[str, int, int], list[dict[str, Any]]] = {}
+    for e in edges:
+        if e["kind"] in track_bundle.MANUAL_KINDS:
+            key = (e["side"], math.floor(e["x"] / cell), math.floor(e["z"] / cell))
+            marked.setdefault(key, []).append(e)
+    if not marked:
+        return edges, 0
+
+    def beside_a_mark(e: dict[str, Any]) -> bool:
+        cx, cz = math.floor(e["x"] / cell), math.floor(e["z"] / cell)
+        for gx in (cx - 1, cx, cx + 1):
+            for gz in (cz - 1, cz, cz + 1):
+                for m in marked.get((e["side"], gx, gz), ()):
+                    dx, dz = e["x"] - m["x"], e["z"] - m["z"]
+                    d = math.hypot(dx, dz)
+                    if d > MARKED_WINS_M or not _same_level(m, e, d):
+                        continue
+                    heading = math.hypot(m["hx"], m["hz"])
+                    if heading < 1e-6:
+                        return True  # a mark with no heading: nearness is all there is
+                    if abs(dx * m["hz"] - dz * m["hx"]) / heading >= MARKED_ASIDE_M:
+                        return True
+        return False
+
+    kept = [e for e in edges if e["kind"] in track_bundle.MANUAL_KINDS or not beside_a_mark(e)]
+    return kept, len(edges) - len(kept)
+
 
 # --- chain walking ------------------------------------------------------------
 # One border cell per metre per side when surveyed continuously; on the
@@ -843,6 +908,7 @@ def compile_bundle(
 
     evidence = doc["edges"]
     edges, applied = track_corrections.apply(evidence, corrections)
+    edges, superseded = prefer_marked(edges)
     # Every kind is a border record — "wall" or "runoff" says what lies BEYOND
     # the edge, not that the edge isn't one (#49) — so every kind takes part
     # in the ordering. Walls are additionally kept as their own drawing layer,
@@ -873,6 +939,9 @@ def compile_bundle(
             "points": len(evidence),
             "runs": meta["runs"],
             "sources": len(meta["source_runs"]),
+            # Automatic records set aside for a hand mark beside them
+            # (prefer_marked): read, and not drawn.
+            "superseded": superseded,
             "bundle_updated_at": meta["updated_at"],
             "app_version": _app_version(),
         },

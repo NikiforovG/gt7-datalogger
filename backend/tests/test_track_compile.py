@@ -657,3 +657,91 @@ def test_for_track_recompiles_when_the_corrections_change(tmp_path) -> None:
     track_compile._CACHE.clear()
     broken = track_compile.for_track(tmp_path, track)
     assert broken is not None and broken["corrections"] is None
+
+
+# --- a hand mark is the border ------------------------------------------------
+
+
+def _marked_and_traced(offset=1.1, length=300, aside=0.0):
+    """A straight left border marked by hand every metre, AND traced by the
+    straddle tracer `offset` metres off it — the two readings of one kerb the
+    shared bundles carry wherever a driver marked it. A plain automatic right
+    border sits a road away."""
+    edges = []
+    for i in range(length):
+        edges.append(_edge(float(i), 0.0, 1.0, 0.0, "L", kind="edge", y=0.0))
+        edges.append(_edge(i + aside, offset, 1.0, 0.0, "L", kind="straddle", y=0.0))
+        edges.append(_edge(float(i), -10.0, 1.0, 0.0, "R", kind="straddle", y=0.0))
+    return edges
+
+
+def _without_preference(monkeypatch):
+    monkeypatch.setattr(track_compile, "prefer_marked", lambda edges: (edges, 0))
+
+
+def test_a_kerb_marked_by_hand_and_traced_is_drawn_once(monkeypatch) -> None:
+    doc = _document(_marked_and_traced())
+    compiled = track_compile.compile_bundle(doc)
+    assert len(compiled["borders"]["L"]) == 1
+    assert compiled["gaps"]["L"] == []
+    # Every traced record beside the mark gave way, and the plain automatic
+    # border across the road did not.
+    assert compiled["source"]["superseded"] == 300
+    assert len(compiled["borders"]["R"]) == 1
+
+    # Without the preference the same evidence draws two parallel borders:
+    # the stray line beside the kerb.
+    _without_preference(monkeypatch)
+    assert len(track_compile.compile_bundle(doc)["borders"]["L"]) == 2
+
+
+def test_the_real_lago_maggiore_stretch_compiles_without_its_gaps(monkeypatch) -> None:
+    doc = json.loads(
+        (Path(__file__).parent / "data" / "lago_maggiore_marked_and_traced.json")
+        .read_text(encoding="utf-8")
+    )
+    fixed = track_compile.compile_bundle(doc)
+    assert fixed["gaps"] == {"L": [], "R": []}
+    assert fixed["source"]["superseded"] > 0
+
+    # The failure this exists for: the walk zigzags between two lines of one
+    # kerb, ~1.1 m apart, and breaks — with records all through every gap.
+    _without_preference(monkeypatch)
+    broken = track_compile.compile_bundle(doc)
+    assert len(broken["gaps"]["L"]) + len(broken["gaps"]["R"]) >= 5
+
+
+def test_only_a_record_beside_the_mark_gives_way() -> None:
+    kept, superseded = track_compile.prefer_marked([
+        _edge(0.0, 0.0, 1.0, 0.0, "L", kind="edge"),
+        _edge(1.5, 0.1, 1.0, 0.0, "L", kind="straddle"),  # in line: the border continuing
+        _edge(0.5, 1.1, 1.0, 0.0, "L", kind="straddle"),  # beside it: the second reading
+        _edge(0.5, 1.1, 1.0, 0.0, "R", kind="auto"),  # beside it, but the other border
+        _edge(0.0, 4.0, 1.0, 0.0, "L", kind="auto"),  # too far to be the same kerb
+    ])
+    assert superseded == 1
+    assert [(e["x"], e["z"], e["side"]) for e in kept] == [
+        (0.0, 0.0, "L"), (1.5, 0.1, "L"), (0.5, 1.1, "R"), (0.0, 4.0, "L"),
+    ]
+
+
+def test_a_mark_on_the_deck_above_does_not_take_the_road_below() -> None:
+    kept, superseded = track_compile.prefer_marked([
+        _edge(0.0, 0.0, 1.0, 0.0, "L", kind="wall", y=8.0),
+        _edge(0.0, 1.0, 1.0, 0.0, "L", kind="straddle", y=0.0),
+    ])
+    assert superseded == 0
+    assert len(kept) == 2
+
+
+def test_automatic_evidence_alone_is_compiled_as_it_always_was() -> None:
+    compiled = track_compile.compile_bundle(_document(_ring()))
+    assert compiled["source"]["superseded"] == 0
+    assert compiled["gaps"] == {"L": [], "R": []}
+
+
+def test_the_preference_reads_the_bundle_and_never_edits_it() -> None:
+    doc = _document(_marked_and_traced(length=40))
+    before = json.dumps(doc, sort_keys=True)
+    track_compile.compile_bundle(doc)
+    assert json.dumps(doc, sort_keys=True) == before
