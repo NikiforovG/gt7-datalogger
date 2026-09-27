@@ -609,7 +609,19 @@ class LapProcessor:
         return self._lap_clock_samples
 
     async def feed(self, p: TelemetryPacket) -> None:
+        # Frames covered since the previous packet, from the console's own
+        # packet counter. Tracked during inactive states too, so their frames
+        # do not inflate the lap clock when driving resumes.
+        gap = p.packet_id - self._last_pid if self._last_pid >= 0 else 1
+        self._last_pid = p.packet_id
+        if 1 <= gap <= MAX_FRAME_GAP:
+            self._pending_dt = gap
+            self._dropped_frames += gap - 1
+        else:
+            self._pending_dt = 1  # first packet, pid reset, or discontinuity
+
         if p.is_loading:
+            self._clock_offset_ms = None
             # A replay that just ended streams LOADING while the menu builds,
             # and the finished flying lap is still in the buffer — the counter
             # step that would commit it never arrives (#26). Same discipline
@@ -624,16 +636,32 @@ class LapProcessor:
                     await self._emit_salvaged(lap, len(finished["t"]))
             return
 
-        # Frames covered since the previous packet, from the console's own
-        # packet counter. Tracked for EVERY non-loading packet (paused ones
-        # too) so unpausing sees a ~1-frame gap and pauses add no lap time.
-        gap = p.packet_id - self._last_pid if self._last_pid >= 0 else 1
-        self._last_pid = p.packet_id
-        if 1 <= gap <= MAX_FRAME_GAP:
-            self._pending_dt = gap
-            self._dropped_frames += gap - 1
-        else:
-            self._pending_dt = 1  # first packet, pid reset, or discontinuity
+        finish_boundary = (
+            self._session is not None
+            and p.car_id == self._session.car_id
+            and not p.is_paused
+            and p.current_lap == self._current_lap + 1
+            and 0 < p.total_laps == self._current_lap
+        )
+        if (not p.is_on_track or p.is_paused or p.current_lap < 0) and not finish_boundary:
+            # Inactive counters cannot confirm a restart. A matching GT7 time
+            # can still vouch for a replay that ended without a line crossing.
+            if self._session is not None and not p.is_paused:
+                interrupted = (
+                    p.car_id != self._session.car_id or p.current_lap != self._current_lap
+                )
+                if interrupted and len(self._samples["t"]) >= self.min_lap_ticks:
+                    finished = self._samples
+                    lap = self._build_salvaged_lap(
+                        self._current_lap, finished, self._gt_clock, p
+                    )
+                    if lap is not None:
+                        self._reset_lap_buffer(p)
+                        await self._emit_salvaged(lap, len(finished["t"]))
+                elif not interrupted:
+                    self._last_packet = p
+            self._clock_offset_ms = None
+            return
 
         # A car change or lap reset is about to tear the session down with a
         # full lap still buffered: the ending-at-the-line case again, seen
@@ -663,6 +691,11 @@ class LapProcessor:
             self._current_lap > 0 and 0 <= p.current_lap < self._current_lap
         )
         if self._session is None or lap_reset:
+            log.info(
+                "session boundary: %s (car=%d, lap=%d -> %d, packet=%d)",
+                "lap reset" if lap_reset else "new driving context",
+                p.car_id, self._current_lap, p.current_lap, p.packet_id,
+            )
             self._session = SessionInfo(
                 car_id=p.car_id,
                 car_category=p.car_category or "",
