@@ -95,7 +95,13 @@ async def test_session_archive_holds_every_lap_and_the_session(client) -> None:
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         assert zf.testzip() is None
         assert sorted(zf.namelist()) == sorted(
-            [f"{folder}/session.json", *(f"{folder}/{name}" for name in lap_files)]
+            [
+                f"{folder}/session.json",
+                # The lap analysis document (#115); tests/test_lap_analysis.py
+                # is where what is in it is checked.
+                f"{folder}/analysis.json",
+                *(f"{folder}/{name}" for name in lap_files),
+            ]
         )
         manifest = json.loads(zf.read(f"{folder}/session.json"))
         docs = [json.loads(zf.read(f"{folder}/{name}")) for name in lap_files]

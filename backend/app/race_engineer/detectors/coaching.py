@@ -2,6 +2,11 @@
 
 Everything here is spoken after a lap completes, never during the corner —
 a warning that arrives mid-apex is a distraction, not coaching.
+
+Every comparison is made on the reference lap's distance axis
+(`EngineerContext.on_axis`), and what a lap did at a corner — where it
+braked, how slow it got — is `processing.corner_metrics`' answer, the same
+one the lap analysis document carries. Nothing here defines a braking point.
 """
 
 from __future__ import annotations
@@ -9,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.processing.analysis import time_delta_series
+from app.processing.corner_metrics import brake_point_delta, min_speed_delta
 from app.race_engineer.detectors.base import Detector
 from app.race_engineer.formatter import (
     spoken_corner,
@@ -30,8 +36,6 @@ from app.race_engineer.thresholds import (
     COACH_WINDOW_LAPS,
     CORNER_APEX_SPEED_DIFF_MIN_KMH,
     CORNER_BRAKE_DIFF_MIN_M,
-    CORNER_BRAKE_ON_PCT,
-    CORNER_BRAKE_SEARCH_M,
     CORNER_LOSS_MIN_MS,
 )
 
@@ -88,13 +92,16 @@ class CoachingDetector(Detector):
         if len(recent) < BRAKE_WINDOW_LAPS:
             return []
 
+        theirs = ctx.reference_measures()
+        mine = [ctx.on_axis(rec).measures(ctx.corners) for rec in recent]
         worst_corner: int | None = None
         worst_delta = 0.0
         for corner in ctx.corners:
             entry, exit_ = float(corner["entry_dist"]), float(corner["exit_dist"])
             if entry >= exit_:  # wraps the start line; distances aren't comparable
                 continue
-            deltas = [_brake_point_delta(rec.samples, ref, entry) for rec in recent]
+            number = int(corner["n"])
+            deltas = [brake_point_delta(m.get(number), theirs.get(number)) for m in mine]
             if any(d is None for d in deltas):
                 continue
             values = [d for d in deltas if d is not None]
@@ -135,7 +142,10 @@ class CoachingDetector(Detector):
         """Same wheel, same stretch of track, several times in recent laps."""
         buckets: dict[tuple[str, str, int], list[float]] = {}
         for record in ctx.laps[:COACH_WINDOW_LAPS]:
-            for event in record.events:
+            # Where the event happened on the reference's axis, which is the
+            # axis the corners are on: "the same stretch of track" and "the
+            # corner it was braking for" are both questions of place.
+            for event in ctx.on_axis(record).events:
                 kind = str(event.get("type", ""))
                 if kind not in ("lockup", "wheelspin", "bottoming"):
                     continue
@@ -225,7 +235,8 @@ class CoachingDetector(Detector):
             return []
         if lap.time_ms <= ctx.prev_best_ms:
             return []
-        series = time_delta_series(lap.samples, ref, step=DELTA_STEP_M)
+        placed = ctx.on_axis(lap)
+        series = time_delta_series(placed.samples, ref, step=DELTA_STEP_M)
         deltas = series["delta_ms"]
         if len(deltas) < 2:
             return []
@@ -251,8 +262,10 @@ class CoachingDetector(Detector):
         number = int(worst_corner["n"])
         entry = float(worst_corner["entry_dist"])
         exit_ = float(worst_corner["exit_dist"])
-        brake_delta = _brake_point_delta(lap.samples, ref, entry)
-        apex_delta = _apex_speed_delta(lap.samples, ref, entry, exit_)
+        mine = placed.measures(ctx.corners).get(number)
+        theirs = ctx.reference_measures().get(number)
+        brake_delta = brake_point_delta(mine, theirs)
+        apex_delta = min_speed_delta(mine, theirs)
         detail = _detail_phrase(brake_delta, apex_delta, ctx.units)
 
         if detail:
@@ -289,56 +302,6 @@ class CoachingDetector(Detector):
 
 
 # --- how the corner was driven differently -----------------------------------
-
-
-def _brake_point(samples: dict[str, list[float]], entry: float) -> float | None:
-    """Distance of the first brake application approaching a corner.
-
-    Looked for in a window before the corner's entry: braking belongs to the
-    approach, and a fast corner may have none at all.
-    """
-    dist = samples.get("dist") or []
-    brake = samples.get("brake") or []
-    start = entry - CORNER_BRAKE_SEARCH_M
-    for i in range(min(len(dist), len(brake))):
-        if dist[i] < start:
-            continue
-        if dist[i] > entry:
-            return None
-        if brake[i] >= CORNER_BRAKE_ON_PCT:
-            return dist[i]
-    return None
-
-
-def _brake_point_delta(
-    lap: dict[str, list[float]], ref: dict[str, list[float]], entry: float
-) -> float | None:
-    """Metres earlier (negative) or later (positive) than the reference lap."""
-    mine = _brake_point(lap, entry)
-    theirs = _brake_point(ref, entry)
-    if mine is None or theirs is None:
-        return None
-    return mine - theirs
-
-
-def _min_speed(samples: dict[str, list[float]], entry: float, exit_: float) -> float | None:
-    dist = samples.get("dist") or []
-    speed = samples.get("speed") or []
-    window = [
-        speed[i] for i in range(min(len(dist), len(speed))) if entry <= dist[i] <= exit_
-    ]
-    return min(window) if window else None
-
-
-def _apex_speed_delta(
-    lap: dict[str, list[float]], ref: dict[str, list[float]], entry: float, exit_: float
-) -> float | None:
-    """km/h carried at the slowest point, relative to the reference lap."""
-    mine = _min_speed(lap, entry, exit_)
-    theirs = _min_speed(ref, entry, exit_)
-    if mine is None or theirs is None:
-        return None
-    return mine - theirs
 
 
 def _detail_phrase(

@@ -913,6 +913,12 @@ def _wall_tick(e: dict[str, Any]) -> list[float]:
 _VERSION: str | None = None
 
 
+def app_version() -> str:
+    """The build that is running, as pyproject states it — stamped into every
+    derived document so a reader knows what compiled it."""
+    return _app_version()
+
+
 def _app_version() -> str:
     global _VERSION
     if _VERSION is None:

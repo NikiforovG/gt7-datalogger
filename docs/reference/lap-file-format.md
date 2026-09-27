@@ -74,6 +74,7 @@ session into one file:
 ```text
 gt7-session-12/
   session.json
+  analysis.json
   laps/lap-001-345.json
   laps/lap-002-346.json
 ```
@@ -93,9 +94,15 @@ imports on its own with **Import lap…**.
   "session": { "id": 12, "car_name": "...", "track_name": "...", "tags": ["wet"],
                "note": "...", "bests_excluded": false, "final_position": 3, "...": "..." },
   "laps": [ { "file": "laps/lap-001-345.json", "id": 345, "number": 1,
-              "time_ms": 92450, "counts_for_best": true } ]
+              "time_ms": 92450, "counts_for_best": true } ],
+  "analysis": "analysis.json"
 }
 ```
+
+`analysis.json` is the session's [lap analysis document](lap-analysis-format.md):
+every lap measured corner by corner against the session's best. It is derived from
+the lap files beside it, so nothing reads it back on import. A session without laps
+has none, and `session.json` then has no `analysis` key.
 
 `session` is the row exactly as `GET /api/sessions` lists it. Importing a whole
 archive back — recreating the session rather than adding its laps to the current

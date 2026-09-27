@@ -683,6 +683,155 @@ def test_braking_late_is_reported_too() -> None:
     assert call.text == "You are braking late into turn four, about thirty meters."
 
 
+# --- coaching compares laps by place (#110, #115) ------------------------------
+
+
+def _placed_lap(
+    stretch: float = 1.0, brake_at: float = 400.0, offset: float = 0.0
+) -> dict[str, list[float]]:
+    """A lap down a straight road with a corner at 500-620 m of it.
+
+    `brake_at` is where on the ROAD the brake went on. `stretch` is how much
+    further the lap's own distance says it went than the road is long — a
+    weaving line, a slide — and `offset` how far to one side it ran.
+    """
+    road = [i * 5.0 for i in range(200)]
+    return {
+        "dist": [x * stretch for x in road],
+        "pos_x": list(road),
+        "pos_z": [offset] * len(road),
+        "t": [x / 50.0 for x in road],
+        "speed": [180.0] * len(road),
+        "brake": [100.0 if brake_at <= x < 500 else 0.0 for x in road],
+    }
+
+
+def test_braking_at_the_same_spot_is_not_early_whatever_the_distance_says() -> None:
+    """The lap's own distance runs 5 % long, so by it the brake went on at
+    420 m against the reference's 400. On the road it was the same place."""
+    mgr = manager(verbosity="coach")
+    _coach_ready(mgr, _placed_lap())
+    for lap in (1, 2):
+        out = mgr.on_lap(
+            completed_lap(number=lap, time_ms=92_000 + lap,
+                          samples=_placed_lap(stretch=1.05, offset=2.0),
+                          session_best_before_ms=92_000)
+        )
+    assert "braking_late" not in types(out)
+    assert "braking_early" not in types(out)
+    assert mgr.ctx.laps[0].axis is not None
+    assert mgr.ctx.laps[0].axis.aligned is True
+
+
+def test_braking_early_on_the_road_is_heard_through_a_stretched_distance() -> None:
+    """By its own distance this lap braked at 399 m — level with the
+    reference. On the road it was 20 m early."""
+    mgr = manager(verbosity="coach")
+    _coach_ready(mgr, _placed_lap())
+    for lap in (1, 2):
+        out = mgr.on_lap(
+            completed_lap(number=lap, time_ms=92_000 + lap,
+                          samples=_placed_lap(stretch=1.05, brake_at=380.0),
+                          session_best_before_ms=92_000)
+        )
+    call = next(c for c in out if c.event_type == "braking_early")
+    assert call.metadata["delta_m"] == pytest.approx(-20.0, abs=0.5)
+
+
+def test_braking_for_the_corner_before_is_not_this_corners_braking_point() -> None:
+    """Two corners 160 m apart. The reference brakes for both; these laps
+    lift for the first and brake for the second exactly where the reference
+    did. The second corner's 250 m window holds the reference's braking for
+    the FIRST, and measured from that these laps braked 200 m late."""
+    mgr = manager(verbosity="coach")
+    mgr.ctx.corners = [
+        {"n": 3, "entry_dist": 300.0, "exit_dist": 420.0, "apex_dist": 360.0},
+        {"n": 4, "entry_dist": 460.0, "exit_dist": 580.0, "apex_dist": 520.0},
+    ]
+
+    def lap(brakes_for_the_first: bool) -> dict[str, list[float]]:
+        dist = [i * 5.0 for i in range(200)]
+        return {
+            "dist": dist,
+            "t": [d / 50.0 for d in dist],
+            "speed": [180.0 for _ in dist],
+            "brake": [
+                100.0 if (brakes_for_the_first and 250 <= d < 340) or 450 <= d < 500 else 0.0
+                for d in dist
+            ],
+        }
+
+    mgr.ctx.reference = lap(brakes_for_the_first=True)
+    for number in (1, 2):
+        out = mgr.on_lap(
+            completed_lap(number=number, time_ms=92_000 + number,
+                          samples=lap(brakes_for_the_first=False),
+                          session_best_before_ms=92_000)
+        )
+    assert "braking_late" not in types(out)
+    assert "braking_early" not in types(out)
+    theirs = mgr.ctx.reference_measures()
+    mine = mgr.ctx.on_axis(mgr.ctx.laps[0]).measures(mgr.ctx.corners)
+    assert (theirs[3].brake_on, theirs[4].brake_on) == (250.0, 450.0)
+    assert (mine[3].brake_on, mine[4].brake_on) == (None, 450.0)
+
+
+async def test_the_lap_is_lined_up_before_the_detectors_run() -> None:
+    mgr = manager(verbosity="coach")
+    _coach_ready(mgr, _placed_lap())
+    lap = completed_lap(number=1, time_ms=92_001, samples=_placed_lap(stretch=1.05),
+                        session_best_before_ms=92_000)
+    await mgr.prepare_lap(lap)
+    prepared = mgr._prepared
+    assert prepared is not None
+    assert prepared[1].aligned is True
+    mgr.on_lap(lap)
+    # on_lap took what prepare_lap placed, rather than placing it again.
+    assert mgr.ctx.laps[0].axis is prepared[1]
+    assert mgr._prepared is None
+
+
+async def test_a_lap_prepared_for_nothing_is_not_handed_to_another() -> None:
+    mgr = manager(verbosity="coach")
+    _coach_ready(mgr, _placed_lap())
+    await mgr.prepare_lap(
+        completed_lap(number=1, time_ms=92_001, samples=_placed_lap(stretch=1.05))
+    )
+    other = completed_lap(number=2, time_ms=92_002, samples=_placed_lap(stretch=1.02))
+    mgr.on_lap(other)
+    axis = mgr.ctx.laps[0].axis
+    assert axis is None or axis.samples["t"] == other.samples["t"]
+
+
+async def test_a_new_reference_puts_the_recent_laps_on_its_axis() -> None:
+    mgr = manager(verbosity="coach")
+    _coach_ready(mgr, _placed_lap())
+    mgr.on_lap(completed_lap(number=1, time_ms=92_500, samples=_placed_lap(stretch=1.05),
+                             session_best_before_ms=92_000))
+    old = mgr.ctx.on_axis(mgr.ctx.laps[0])
+    best = _placed_lap(offset=1.0)
+    mgr.on_lap(completed_lap(number=2, time_ms=91_000, samples=best,
+                             session_best_before_ms=92_000))
+    await mgr.refresh_reference()
+    assert mgr.ctx.reference is best
+    first, second = mgr.ctx.laps[1], mgr.ctx.laps[0]
+    assert first.axis is not None and first.axis is not old
+    assert first.axis.reference is best
+    assert first.axis.aligned is True
+    # The lap that IS the reference is on its own axis already.
+    assert second.axis is not None and second.axis.samples is best
+
+
+def test_a_lap_from_an_earlier_session_keeps_its_own_distance() -> None:
+    mgr = manager(verbosity="coach")
+    mgr.on_lap(completed_lap(number=1, time_ms=92_000, samples=_placed_lap(stretch=1.05)))
+    mgr.on_session(SessionInfo(car_id=7, started_at="later"), session_id=2)
+    _coach_ready(mgr, _placed_lap())
+    earlier = mgr.ctx.laps[0]
+    assert mgr.ctx.on_axis(earlier).aligned is False
+    assert mgr.ctx.on_axis(earlier).samples is earlier.samples
+
+
 def test_every_callout_type_is_documented_for_the_user() -> None:
     """A category toggle is guesswork unless the UI can say what it produces.
 

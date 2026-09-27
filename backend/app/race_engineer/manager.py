@@ -41,7 +41,14 @@ from app.race_engineer.models import (
     VoiceCallout,
     categories_for,
 )
-from app.race_engineer.state import EngineerContext, LapRecord, PacketClock
+from app.race_engineer.state import (
+    EngineerContext,
+    LapOnAxis,
+    LapRecord,
+    PacketClock,
+    place_on_axis,
+)
+from app.race_engineer.thresholds import COACH_WINDOW_LAPS
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +89,9 @@ class RaceEngineerManager:
         self._seq = 0
         self._pending_reference: dict[str, list[float]] | None = None
         self._reference_lap: int | None = None
+        # The lap about to be reported, already placed on the reference's
+        # axis by prepare_lap: (its samples, where they were placed).
+        self._prepared: tuple[dict[str, list[float]], LapOnAxis] | None = None
         self.last_callout: VoiceCallout | None = None
         self.stats: dict[str, int] = {
             "evaluated": 0,
@@ -147,9 +157,42 @@ class RaceEngineerManager:
                 out.append(callout)
         return out
 
+    async def prepare_lap(self, lap: CompletedLap) -> None:
+        """Place the lap on the coaching reference's axis before `on_lap`.
+
+        Coaching compares laps by where they were, not how far they had
+        gone, which means walking the lap along the reference's path — tens
+        of milliseconds for a full lap, and several times that on the small
+        boards this runs on. `on_lap` is synchronous and on the event loop,
+        so the walk happens here, on a worker thread, and `on_lap` finds it
+        done. Skipping this call costs nothing but that: the detector places
+        the lap itself when it has not been.
+        """
+        self._prepared = None
+        ref = self.ctx.reference
+        if ref is None or not lap.counts_for_best or not lap.span_confirmed:
+            return
+        if not {"coaching", "chassis"} & self.effective_categories:
+            return
+        corners = self.ctx.corners
+
+        def _place() -> LapOnAxis:
+            view = place_on_axis(lap.samples, lap.events, ref)
+            if corners:
+                view.measures(corners)
+            return view
+
+        try:
+            self._prepared = (lap.samples, await asyncio.to_thread(_place))
+        except Exception:  # noqa: BLE001 - coaching is optional, never fatal
+            log.warning("could not line the lap up with the reference", exc_info=True)
+
     def on_lap(self, lap: CompletedLap) -> list[VoiceCallout]:
         record = LapRecord.from_lap(lap)
         record.session_seq = self.ctx.session_seq
+        prepared, self._prepared = self._prepared, None
+        if prepared is not None and prepared[0] is lap.samples:
+            record.axis = prepared[1]
         self.ctx.laps.insert(0, record)
         del self.ctx.laps[MAX_LAP_HISTORY:]
         self.ctx.span_confirmed = lap.span_confirmed
@@ -251,6 +294,7 @@ class RaceEngineerManager:
         self.ctx.span_confirmed = False
         self._pending_reference = None
         self._reference_lap = None
+        self._prepared = None
         self._emitted.clear()
         self._severity.clear()
         self.clock.reset()
@@ -278,16 +322,31 @@ class RaceEngineerManager:
             return
         track = self.ctx.track_name
         source = self.corner_source
+        # The laps the next comparison will read were placed on the OLD
+        # reference's axis. Placing them on the new one belongs on the same
+        # thread as the corner detection, for the same reason.
+        recent = [
+            rec
+            for rec in self.ctx.laps[:COACH_WINDOW_LAPS]
+            if rec.session_seq == self.ctx.session_seq
+        ]
 
-        def _corners() -> list[dict[str, Any]]:
+        def _corners() -> tuple[list[dict[str, Any]], list[LapOnAxis]]:
             authored = source(track) if source is not None else []
-            return corners_for_lap(samples, authored)
+            corners = corners_for_lap(samples, authored)
+            placed = [place_on_axis(rec.samples, rec.events, samples) for rec in recent]
+            for view in placed:
+                view.measures(corners)
+            return corners, placed
 
         try:
-            self.ctx.corners = await asyncio.to_thread(_corners)
+            self.ctx.corners, placed = await asyncio.to_thread(_corners)
         except Exception:  # noqa: BLE001 - coaching is optional, never fatal
             log.warning("corner detection failed; coaching calls stay generic", exc_info=True)
             self.ctx.corners = []
+            return
+        for rec, view in zip(recent, placed, strict=True):
+            rec.axis = view
 
     # --- emission -----------------------------------------------------------
 

@@ -612,6 +612,17 @@ function SessionRow({
                   </a>
                 </Tip>
               )}
+              {s.lap_count > 0 && (
+                <Tip content="Download this session's lap analysis: every lap measured corner by corner against the session's best — braking points, minimum speeds, throttle and time lost — as one small JSON file">
+                  <a
+                    className="btn px-3 py-1 hover:border-accent hover:text-accent"
+                    href={api.sessionAnalysisUrl(s.id)}
+                    download={`gt7-session-${s.id}-analysis.json`}
+                  >
+                    Export analysis
+                  </a>
+                </Tip>
+              )}
               <Tip content="Replay recordings and other drivers' laps are indistinguishable from your own driving in telemetry — keeping them off the Bests board is a manual call.">
                 <button
                   className="btn px-3 py-1 hover:border-accent hover:text-accent"

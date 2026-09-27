@@ -186,3 +186,49 @@ async def test_new_clients_get_status_but_never_past_callouts(service) -> None:
     await asyncio.sleep(0.01)
     assert late.messages("voice_callout") == []
     assert late.messages("race_engineer_status")[0]["data"]["active_client_id"] == "client-a"
+
+
+async def test_a_finished_lap_is_lined_up_off_the_loop_before_coaching_runs(service) -> None:
+    """Coaching compares laps by place (#110): the service has the finished
+    lap placed on the reference's axis before the detectors see it."""
+    from tests.circle_track import RADIUS, Driver
+
+    await register(service, FakeWS(), "client-a")
+    order: list[str] = []
+    prepare, on_lap = service.engineer.prepare_lap, service.engineer.on_lap
+
+    async def spy_prepare(lap):  # noqa: ANN001, ANN202
+        order.append(f"prepare {lap.number}")
+        await prepare(lap)
+
+    def spy_on_lap(lap):  # noqa: ANN001, ANN202
+        order.append(f"on_lap {lap.number}")
+        return on_lap(lap)
+
+    service.engineer.prepare_lap = spy_prepare  # type: ignore[method-assign]
+    service.engineer.on_lap = spy_on_lap  # type: ignore[method-assign]
+
+    driver = Driver()
+    radii = [RADIUS, RADIUS + 6.0, RADIUS - 4.0, RADIUS + 3.0, RADIUS + 5.0]
+    # The first lap is the quickest, so it stays the reference throughout.
+    times = [37_000, 37_700, 37_800, 37_900, 38_000]
+    for number, radius in enumerate(radii, start=1):
+        previous = times[number - 2] if number > 1 else -1
+        for p in driver.lap(number, radius=radius, last_lap_ms=previous):
+            await service._on_packet(p)
+    await service._on_packet(driver.cross(len(radii) + 1, times[-1]))
+
+    assert order == [f"{step} {n}" for n in range(1, len(radii) + 1)
+                     for step in ("prepare", "on_lap")]
+    ctx = service.engineer.ctx
+    assert ctx.reference is not None
+    assert ctx.best_lap_ms == 37_000
+    latest = ctx.laps[0]
+    assert latest.samples is not ctx.reference
+    assert latest.counts_for_best and ctx.span_confirmed
+    # Placed by prepare_lap, against the reference in force, by position:
+    # five metres wider is 31 m more road, and the two axes differ by it.
+    assert latest.axis is not None
+    assert latest.axis.reference is ctx.reference
+    assert latest.axis.aligned is True
+    assert latest.samples["dist"][-1] - latest.axis.samples["dist"][-1] > 20.0
