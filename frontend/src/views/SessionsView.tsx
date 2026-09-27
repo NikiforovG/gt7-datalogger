@@ -12,7 +12,7 @@ import { LapSparkline } from "@/components/LapSparkline";
 import { ConfirmDialog, PromptDialog } from "@/components/ui/Dialog";
 import { Select } from "@/components/ui/Select";
 import { Tip } from "@/components/ui/Tooltip";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { lapColorMap } from "@/lib/colors";
 import { formatLapTime, formatSpeed, formatTime, formatTimeShort } from "@/lib/format";
 import { openInAnalysis } from "@/lib/router";
@@ -364,10 +364,19 @@ export function SessionsView({ subTab = "sessions" }: { subTab?: SubTab }) {
         onConfirm={async () => {
           const id = deletingSession!;
           setDeletingSession(null);
-          await api.deleteSession(id);
-          setExpanded((cur) => (cur === id ? null : cur));
-          toast(`Session #${id} deleted`, "success");
-          refresh();
+          try {
+            await api.deleteSession(id);
+            setExpanded((cur) => (cur === id ? null : cur));
+            toast(`Session #${id} deleted`, "success");
+            refresh();
+          } catch (error) {
+            toast(
+              error instanceof ApiError && error.status === 409
+                ? "Cannot delete the current session. Start a new session first."
+                : "Could not delete session",
+              "error",
+            );
+          }
         }}
         onCancel={() => setDeletingSession(null)}
       />

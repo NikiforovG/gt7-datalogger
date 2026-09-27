@@ -1,5 +1,7 @@
 """API integration tests against an in-memory pipeline (no UDP, no network)."""
 
+import asyncio
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -90,6 +92,91 @@ async def test_health(client) -> None:
     c, _ = client
     resp = await c.get("/api/health")
     assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("recording", [True, False])
+@pytest.mark.parametrize("has_laps", [True, False])
+async def test_delete_current_session_preserves_recording(client, recording, has_laps) -> None:
+    """Deleting the recorder's session must not orphan subsequent laps/results,
+    including an empty menu session or a temporarily paused recording."""
+    c, service = client
+    if has_laps:
+        await drive_laps(service, laps=1)
+    else:
+        await service._on_packet(
+            parse_packet(build_packet(current_lap=0, flags=ON_TRACK, car_id=7))
+        )
+    session_id = service.session_id
+    before = (await c.get("/api/sessions")).json()
+    before_laps = (await c.get(f"/api/sessions/{session_id}/laps")).json()
+    service.recording = recording
+
+    response = await c.delete(f"/api/sessions/{session_id}")
+
+    assert response.status_code == 409
+    assert (await c.get("/api/sessions")).json() == before
+    assert (await c.get(f"/api/sessions/{session_id}/laps")).json() == before_laps
+    service.recording = True
+    await drive_race(service, race_laps=3, start_lap=2 if has_laps else 1)
+    finished = (await c.get("/api/sessions")).json()[0]
+    assert finished["id"] == session_id
+    assert finished["lap_count"] == 3
+    assert finished["final_position"] == 2
+    assert finished["final_total_positions"] == 8
+    assert finished["race_time_ms"] == (181_000 if has_laps else 183_000)
+
+
+async def test_delete_session_during_creation_preserves_recorder(client, monkeypatch) -> None:
+    """A committed session must be protected before its ID is published."""
+    c, service = client
+    committed = asyncio.Event()
+    release = asyncio.Event()
+    create_session = service.repo.create_session
+
+    async def delayed_create(*args, **kwargs):
+        session_id = await create_session(*args, **kwargs)
+        committed.set()
+        await release.wait()
+        return session_id
+
+    monkeypatch.setattr(service.repo, "create_session", delayed_create)
+    creation = asyncio.create_task(service._on_packet(
+        parse_packet(build_packet(current_lap=0, flags=ON_TRACK, car_id=7))
+    ))
+    try:
+        await asyncio.wait_for(committed.wait(), timeout=5)
+        session_id = (await c.get("/api/sessions")).json()[0]["id"]
+        deletion = asyncio.create_task(c.delete(f"/api/sessions/{session_id}"))
+        # Let deletion reach the committed-but-not-published window. With
+        # serialization it waits; without it the real database row is lost.
+        await asyncio.wait({deletion}, timeout=0.1)
+    finally:
+        release.set()
+        await creation
+    response = await deletion
+    assert response.status_code == 409
+    await drive_race(service, race_laps=3)
+    session = (await c.get("/api/sessions")).json()[0]
+    assert session["id"] == session_id
+    assert session["final_position"] == 2
+    assert session["race_time_ms"] == 183_000
+
+
+async def test_delete_historical_session_keeps_current_session(client) -> None:
+    c, service = client
+    await drive_laps(service, laps=1)
+    historical_id = service.session_id
+    await service._on_packet(
+        parse_packet(build_packet(current_lap=1, flags=ON_TRACK, car_id=42))
+    )
+    current_id = service.session_id
+
+    response = await c.delete(f"/api/sessions/{historical_id}")
+
+    assert response.status_code == 200
+    assert (await c.get(f"/api/sessions/{historical_id}/laps")).json() == []
+    sessions = (await c.get("/api/sessions")).json()
+    assert [s["id"] for s in sessions] == [current_id]
 
 
 async def test_pipeline_persists_sessions_and_laps(client) -> None:
@@ -229,14 +316,15 @@ async def test_laps_without_packet_c_have_a_blank_category(client) -> None:
 
 
 async def drive_race(
-    service: TelemetryService, race_laps: int, *, skip_lap: int | None = None
+    service: TelemetryService, race_laps: int, *, skip_lap: int | None = None,
+    start_lap: int = 1,
 ) -> None:
     """A short race with position reporting: P4 climbing to P2, checkered
     flag, a few cool-down packets. skip_lap simulates a stream gap — that
     lap's packets never arrive, and the counter jump costs the lap before it
     too (a boundary that isn't prev+1 completes nothing)."""
     pid = 0
-    for lap in range(1, race_laps + 1):
+    for lap in range(start_lap, race_laps + 1):
         if lap == skip_lap:
             continue
         for _ in range(60):
