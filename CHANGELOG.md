@@ -7,6 +7,25 @@ Notable changes to GT7 Datalogger. The format follows
 
 ### Fixed
 
+- **Analysis no longer shows the previous session under a new session's
+  name.** Picking a session with no completed lap yet from the Analysis
+  dropdown — which is every session until its first lap is finished, so
+  exactly the one you have just started driving — changed the title and
+  nothing else: the lap chips, the map, the charts and the address bar all
+  stayed on the session that had been open, its laps relabelled `S256·L2` as
+  though they had been added from another session on purpose. The lap loader
+  returned before touching the selection when a session had no laps, and a
+  selected lap that is not the session's own is, by design, a guest. Leaving a
+  session now takes its selection, reference, guests and lap list with it, a
+  session with no laps resolves to an empty selection
+  (`lib/analysisSelection`), and the view says *No completed laps in this
+  session yet* in place of the map until the first lap arrives, when it fills
+  in by itself. The address bar and the selection remembered between tabs
+  name the session alone. A lap reply that arrives for a session already
+  left is dropped, so two quick switches cannot land out of order, and the
+  consistency chart is cleared with the session it belonged to. Laps from
+  another session named in a link still load as guests, into an empty
+  session too.
 - **Pulling a shared bundle no longer breaks sync for that circuit.** A pull
   merges every contributor's votes into your bundle, source ids and all, and
   the tracks adapter then uploaded the whole document. The sync service binds
