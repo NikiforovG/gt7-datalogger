@@ -102,8 +102,8 @@ class TelemetryService:
 
         self.recording = True
         self.session_id: int | None = None
-        # Serialize session creation and API deletion: the database commit
-        # can expose a new row before session_id is assigned below.
+        # Deletion must wait for the whole packet/save, including callbacks
+        # that still hold the old processor or session ID across an await.
         self.session_lock = asyncio.Lock()
         self.track_name: str = ""
         self.latest_packet: TelemetryPacket | None = None
@@ -402,8 +402,9 @@ class TelemetryService:
 
     async def _on_packet(self, p: TelemetryPacket) -> None:
         self.latest_packet = p
-        if self.recording:
-            await self.processor.feed(p)
+        async with self.session_lock:
+            if self.recording:
+                await self.processor.feed(p)
         # The live stream (#79) keeps the newest packet and sends it on its
         # own clock; this is a field write unless a frame is due.
         self.sync.live.on_packet(p, self._lap_elapsed_s)
@@ -447,9 +448,8 @@ class TelemetryService:
 
     async def _on_session(self, info: SessionInfo) -> None:
         self.event_watcher.reset()
-        async with self.session_lock:
-            await self._close_previous_session()
-            self.session_id = await self.repo.create_session(info, self.cars.get(info.car_id))
+        await self._close_previous_session()
+        self.session_id = await self.repo.create_session(info, self.cars.get(info.car_id))
         car = self.cars.name(info.car_id)
         self.sync.sessions.session_started(
             self.session_id,
@@ -606,23 +606,24 @@ class TelemetryService:
         processor's session best, the delta reference, the engineer's lap
         history and coaching reference. `lap` is the updated summary.
         """
-        # The service holds a copy of the lap with its old verdict; the
-        # replacement goes whichever session it belongs to (#79).
-        self.sync.sessions.lap_changed(lap["session_id"], lap["id"], lap["number"])
-        if self.session_id is None or lap["session_id"] != self.session_id:
-            return
-        self.processor.set_best_override(lap["number"], lap["best_override"])
-        session = self.processor.session
-        best = session.best_lap_time_ms if session else -1
-        self._session_best_ms = best if best > 0 else None
-        await self._reload_best_ref()
-        # The engineer's history outlives a voice toggle, so it follows the
-        # ruling either way; only adopting a new reference waits for voice.
-        self.engineer.apply_best_override(
-            self.processor.excluded_lap_numbers(), self._session_best_ms
-        )
-        if self.engineer_active:
-            await self.engineer.refresh_reference()
+        async with self.session_lock:
+            # The service holds a copy of the lap with its old verdict; the
+            # replacement goes whichever session it belongs to (#79).
+            self.sync.sessions.lap_changed(lap["session_id"], lap["id"], lap["number"])
+            if self.session_id is None or lap["session_id"] != self.session_id:
+                return
+            self.processor.set_best_override(lap["number"], lap["best_override"])
+            session = self.processor.session
+            best = session.best_lap_time_ms if session else -1
+            self._session_best_ms = best if best > 0 else None
+            await self._reload_best_ref()
+            # The engineer's history outlives a voice toggle, so it follows the
+            # ruling either way; only adopting a new reference waits for voice.
+            self.engineer.apply_best_override(
+                self.processor.excluded_lap_numbers(), self._session_best_ms
+            )
+            if self.engineer_active:
+                await self.engineer.refresh_reference()
 
     async def _reload_best_ref(self) -> None:
         """Point the live delta at the session's fastest counting lap.
@@ -1089,22 +1090,55 @@ class TelemetryService:
 
     # --- controls -----------------------------------------------------------
 
+    async def delete_session(self, session_id: int) -> bool:
+        async with self.session_lock:
+            current = session_id == self.session_id
+            if current and self.recording:
+                return False
+            await self.repo.delete_session(session_id)
+            self.sync.sessions.forget(session_id)
+            if current:
+                if self.processor.session is not None:
+                    self.engineer.on_session(self.processor.session)
+                self.processor = LapProcessor(
+                    on_lap=self._on_lap,
+                    on_session=self._on_session,
+                    on_race_result=self._on_race_result,
+                    min_lap_ticks=self.processor.min_lap_ticks,
+                )
+                self.session_id = None
+                self.survey.session_id = None
+                self.track_name = ""
+                self._session_best_ms = None
+                self._prev_best_ms = None
+                self._set_best_ref(None)
+                self.event_watcher.reset()
+                self.sync.live.set_meta(car="", official_id="", track="")
+                self._publish({"type": "session", "data": await self.status()})
+        return True
+
+    async def set_recording(self, recording: bool) -> None:
+        async with self.session_lock:
+            self.recording = recording
+        self._publish({"type": "status", "data": await self.status()})
+
     async def log_lap_now(self) -> dict[str, Any] | None:
         """Persist the in-progress lap without waiting for the finish line."""
-        samples = self.processor.live_lap_samples
-        if self.session_id is None or not samples["t"]:
-            return None
-        lap = CompletedLap(
-            number=self.processor._current_lap,
-            time_ms=int(samples["t"][-1] * 1000),
-            finished_at=datetime.now(UTC).isoformat(),
-            car_id=self.latest_packet.car_id if self.latest_packet else 0,
-            samples={k: list(v) for k, v in samples.items()},
-            fuel_start=samples["fuel"][0],
-            fuel_end=samples["fuel"][-1],
-        )
-        lap.compute_metrics()
-        if self.track_name:
-            await self._judge_against_survey(lap)
-        lap_id = await self.repo.save_lap(self.session_id, lap)
-        return {"id": lap_id, "number": lap.number, "time_ms": lap.time_ms}
+        async with self.session_lock:
+            samples = self.processor.live_lap_samples
+            if self.session_id is None or not samples["t"]:
+                return None
+            lap = CompletedLap(
+                number=self.processor._current_lap,
+                time_ms=int(samples["t"][-1] * 1000),
+                finished_at=datetime.now(UTC).isoformat(),
+                car_id=self.latest_packet.car_id if self.latest_packet else 0,
+                samples={k: list(v) for k, v in samples.items()},
+                fuel_start=samples["fuel"][0],
+                fuel_end=samples["fuel"][-1],
+            )
+            lap.compute_metrics()
+            if self.track_name:
+                await self._judge_against_survey(lap)
+            lap_id = await self.repo.save_lap(self.session_id, lap)
+            return {"id": lap_id, "number": lap.number, "time_ms": lap.time_ms}

@@ -538,7 +538,7 @@ export function SessionsView({ subTab = "sessions" }: { subTab?: SubTab }) {
           } catch (error) {
             toast(
               error instanceof ApiError && error.status === 409
-                ? "Cannot delete the current session. Start a new session first."
+                ? "Stop recording before deleting the current session."
                 : "Could not delete session",
               "error",
             );

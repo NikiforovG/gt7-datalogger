@@ -234,9 +234,11 @@ session ZIP as `analysis.json`. See
 **Export ▾ → All laps · CSV** downloads one MoTeC-compatible CSV per lap.
 
 **⋯ → Delete session…** removes the session and all its laps. The session **being
-recorded** cannot be deleted — laps driven afterwards would be saved against a
-session that no longer exists — and the view says so if you try. It can be deleted
-once the next session has started.
+recorded** is protected while recording is on, through pauses, pit stops and
+connection drops alike: pause recording with the **● REC** button in the status bar
+first, and the view says so if you try without. Deleting it then also discards its
+unfinished lap, and recording again starts a fresh session. Older sessions can be
+deleted while recording continues.
 
 ## Header actions
 

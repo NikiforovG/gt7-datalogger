@@ -61,18 +61,11 @@ async def sessions(
 @router.delete("/sessions/{session_id}", dependencies=[Depends(require_admin)])
 async def delete_session(request: Request, session_id: int) -> dict[str, str]:
     service = svc(request)
-    async with service.session_lock:
-        # Pausing recording does not release this ID: the next packet still
-        # writes to it. Keep the session row until the recorder has moved on.
-        if session_id == service.session_id:
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot delete the current session. Start a new session first.",
-            )
-        await service.repo.delete_session(session_id)
-    # Nothing of it is sent any more, and a record left behind would outlive
-    # the id it is filed under (the dropped-empty path already does this).
-    service.sync.sessions.forget(session_id)
+    if not await service.delete_session(session_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Stop recording before deleting the current session.",
+        )
     return {"status": "deleted"}
 
 
@@ -976,7 +969,7 @@ class RecordingPayload(BaseModel):
 
 @router.post("/control/recording", dependencies=[Depends(require_admin)])
 async def set_recording(request: Request, payload: RecordingPayload) -> dict[str, Any]:
-    svc(request).recording = payload.recording
+    await svc(request).set_recording(payload.recording)
     return await svc(request).status()
 
 

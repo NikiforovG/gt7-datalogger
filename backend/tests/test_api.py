@@ -1,6 +1,7 @@
 """API integration tests against an in-memory pipeline (no UDP, no network)."""
 
 import asyncio
+import time
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -94,11 +95,16 @@ async def test_health(client) -> None:
     assert resp.status_code == 200
 
 
-@pytest.mark.parametrize("recording", [True, False])
+@pytest.mark.parametrize("connected", [True, False])
+@pytest.mark.parametrize(
+    "flags", [ON_TRACK, ON_TRACK | int(SimulatorFlags.PAUSED), 0, int(SimulatorFlags.LOADING)]
+)
 @pytest.mark.parametrize("has_laps", [True, False])
-async def test_delete_current_session_preserves_recording(client, recording, has_laps) -> None:
+async def test_delete_current_session_preserves_recording(
+    client, has_laps, flags, connected,
+) -> None:
     """Deleting the recorder's session must not orphan subsequent laps/results,
-    including an empty menu session or a temporarily paused recording."""
+    including pauses, inactive pit packets and connection interruptions."""
     c, service = client
     if has_laps:
         await drive_laps(service, laps=1)
@@ -106,10 +112,13 @@ async def test_delete_current_session_preserves_recording(client, recording, has
         await service._on_packet(
             parse_packet(build_packet(current_lap=0, flags=ON_TRACK, car_id=7))
         )
+    await service._on_packet(parse_packet(build_packet(
+        current_lap=2 if has_laps else 0, flags=flags, car_id=7,
+    )))
     session_id = service.session_id
     before = (await c.get("/api/sessions")).json()
     before_laps = (await c.get(f"/api/sessions/{session_id}/laps")).json()
-    service.recording = recording
+    service.source._last_packet_at = time.monotonic() - (0 if connected else 6)
 
     response = await c.delete(f"/api/sessions/{session_id}")
 
@@ -126,9 +135,121 @@ async def test_delete_current_session_preserves_recording(client, recording, has
     assert finished["race_time_ms"] == (181_000 if has_laps else 183_000)
 
 
+@pytest.mark.parametrize("connected", [True, False])
+@pytest.mark.parametrize("has_laps", [True, False])
+async def test_delete_stopped_current_session_and_resume(client, connected, has_laps):
+    c, service = client
+    if has_laps:
+        await drive_laps(service, laps=1)
+    else:
+        await service._on_packet(
+            parse_packet(build_packet(current_lap=1, flags=ON_TRACK, car_id=7))
+        )
+    session_id = service.session_id
+    await c.post("/api/control/recording", json={"recording": False})
+    service.source._last_packet_at = time.monotonic() - (0 if connected else 6)
+
+    response = await c.delete(f"/api/sessions/{session_id}")
+
+    assert response.status_code == 200
+    assert (await c.get("/api/sessions")).json() == []
+    assert (await c.get("/api/status")).json()["session_id"] is None
+    assert (await c.post("/api/control/log-lap-now")).status_code == 409
+    await c.post("/api/control/recording", json={"recording": True})
+    # Continue the same car/lap counter: no natural session boundary can
+    # rescue a stale recorder that still points at the deleted session.
+    await drive_race(service, race_laps=3, start_lap=2)
+    sessions = (await c.get("/api/sessions")).json()
+    assert len(sessions) == 1
+    assert sessions[0]["lap_count"] == 2
+    assert sessions[0]["final_position"] == 2
+    assert sessions[0]["final_total_positions"] == 8
+    laps = await service.repo.list_laps(sessions[0]["id"])
+    assert sorted(lap["number"] for lap in laps) == [2, 3]
+
+
+@pytest.mark.parametrize("manual", [True, False])
+async def test_stop_and_delete_session_wait_for_inflight_lap(client, monkeypatch, manual):
+    c, service = client
+    await drive_laps(service, laps=1)
+    session_id = service.session_id
+    saving = asyncio.Event()
+    release = asyncio.Event()
+    save_lap = service.repo.save_lap
+
+    async def delayed_save(*args, **kwargs):
+        saving.set()
+        await release.wait()
+        return await save_lap(*args, **kwargs)
+
+    monkeypatch.setattr(service.repo, "save_lap", delayed_save)
+    logging = asyncio.create_task(
+        c.post("/api/control/log-lap-now") if manual else service._on_packet(
+            parse_packet(build_packet(
+                current_lap=3, last_lap_time_ms=61_000, flags=ON_TRACK, car_id=7,
+            ))
+        )
+    )
+    try:
+        await asyncio.wait_for(saving.wait(), timeout=5)
+        stopping = asyncio.create_task(c.post("/api/control/recording", json={"recording": False}))
+        await asyncio.wait({stopping}, timeout=0.1)
+        assert not stopping.done()
+        deletion = asyncio.create_task(c.delete(f"/api/sessions/{session_id}"))
+        await asyncio.wait({deletion}, timeout=0.1)
+        assert not deletion.done()
+    finally:
+        release.set()
+        await logging
+        await stopping
+        await deletion
+    assert deletion.result().status_code == 200
+    assert (await c.get("/api/sessions")).json() == []
+    assert (await c.get("/api/laps")).json() == []
+
+
+async def test_delete_current_session_waits_for_best_override(client, monkeypatch):
+    c, service = client
+    await drive_laps(service, laps=2)
+    await c.post("/api/control/recording", json={"recording": False})
+    session_id = service.session_id
+    laps = sorted(await service.repo.list_laps(session_id), key=lambda lap: lap["number"])
+    await c.patch(f"/api/laps/{laps[0]['id']}", json={"best_override": True})
+    reading = asyncio.Event()
+    release = asyncio.Event()
+    lap_samples_json = service.repo.lap_samples_json
+
+    async def delayed_samples(lap_id):
+        raw = await lap_samples_json(lap_id)
+        reading.set()
+        await release.wait()
+        return raw
+
+    monkeypatch.setattr(service.repo, "lap_samples_json", delayed_samples)
+    override = asyncio.create_task(
+        c.patch(f"/api/laps/{laps[1]['id']}", json={"best_override": False})
+    )
+    deletion = None
+    try:
+        await asyncio.wait_for(reading.wait(), timeout=5)
+        deletion = asyncio.create_task(c.delete(f"/api/sessions/{session_id}"))
+        await asyncio.wait({deletion}, timeout=0.1)
+        assert not deletion.done()
+    finally:
+        release.set()
+        await override
+        if deletion is not None:
+            await deletion
+    assert deletion.result().status_code == 200
+    assert service.session_id is None
+    assert service._best_ref is None
+    assert service._best_ref_lap is None
+
+
 async def test_delete_session_during_creation_preserves_recorder(client, monkeypatch) -> None:
     """A committed session must be protected before its ID is published."""
     c, service = client
+    service.source._last_packet_at = time.monotonic()
     committed = asyncio.Event()
     release = asyncio.Event()
     create_session = service.repo.create_session
