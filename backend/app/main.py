@@ -123,7 +123,7 @@ async def sync_car_inventory(
 # Settings key recording that stored laps have been re-checked for grid
 # starts (see Repository.recheck_lap_starts). Bump the value to run it again.
 LAP_START_CHECK_KEY = "lap_start_check"
-LAP_START_CHECK_VERSION = "1"
+LAP_START_CHECK_VERSION = "2"
 
 
 async def recheck_lap_starts(
@@ -139,12 +139,15 @@ async def recheck_lap_starts(
         return
     try:
         marked = await repo.recheck_lap_starts()
+        excluded = await repo.exclude_recorded_race_starts()
         await repo.set_setting(LAP_START_CHECK_KEY, LAP_START_CHECK_VERSION)
     except Exception:
         log.exception("stored laps could not be checked for grid starts; retrying next start")
         return
     if marked:
         log.info("%d stored lap(s) began away from the start/finish line: now partial", marked)
+    if excluded:
+        log.info("%d recorded race opening lap(s) excluded from bests", excluded)
 
 
 async def refresh_cars_if_stale(
