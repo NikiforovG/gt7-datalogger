@@ -629,3 +629,26 @@ async def test_a_blank_track_never_locks_an_unlabeled_survey(client, tmp_path) -
     assert service.survey.track == ""
     assert service.survey.track_locked is False  # auto-ID must still be able to
     service.survey.stop()
+
+
+async def test_delete_all_while_recording_resumes_into_a_fresh_session(client):
+    """Delete all wipes the recorder's session too, and is allowed while
+    recording (the user typed DELETE). The recorder must be reset the way a
+    single delete resets it, or the laps driven next are saved against a
+    session that no longer exists."""
+    c, service = client
+    await drive_laps(service, laps=1)
+    assert service.recording
+
+    assert (await c.post("/api/admin/clear-data")).status_code == 200
+    assert (await c.get("/api/sessions")).json() == []
+    assert (await c.get("/api/status")).json()["session_id"] is None
+
+    # The same car and lap counter carry on: no boundary would rescue a
+    # recorder still pointing at the wiped session.
+    await drive_race(service, race_laps=3, start_lap=2)
+    sessions = (await c.get("/api/sessions")).json()
+    assert len(sessions) == 1
+    assert sessions[0]["lap_count"] == 2
+    laps = await service.repo.list_laps(sessions[0]["id"])
+    assert sorted(lap["number"] for lap in laps) == [2, 3]

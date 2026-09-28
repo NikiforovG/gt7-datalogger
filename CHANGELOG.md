@@ -7,6 +7,16 @@ Notable changes to GT7 Datalogger. The format follows
 
 ### Changed
 
+- **The session being recorded can be deleted once recording is paused.**
+  (#130, contributed by @NikiforovG) Until now it could not be deleted until
+  the next session started, which is never, if you stop driving and switch
+  the console off. Pause recording with **● REC** and it can go. Its
+  unfinished lap goes with it, and recording again starts a fresh session.
+  While recording is on it stays protected, through pauses, pit stops and
+  connection drops alike. Deleting now shares one lock with packet
+  processing, lap saves, best-lap rulings, the recording switch and **Log
+  lap now**, so a delete waits for a lap still being saved rather than
+  racing it.
 - **Web UI usability revamp.** Admin is renamed **Settings**. It now has a
   section rail, a health strip, and a single Apply bar that sends every
   buffered edit in one request, replacing seven separate Apply buttons. The
@@ -22,6 +32,12 @@ Notable changes to GT7 Datalogger. The format follows
 
 ### Fixed
 
+- **"Delete all recorded data" while recording no longer strands the next
+  laps.** It cleared the tables but left the recorder holding the wiped
+  session, so the laps driven next were saved against a session that no
+  longer existed. It now takes the same lock and resets the recorder the way
+  deleting the current session does (#130), and recording carries on into a
+  fresh session.
 - **The fastest lap is purple everywhere.** The overlay and dash times
   widget, the Sessions list and the Bests board still drew it in the accent
   blue. On the Bests board a slower time's gap is neutral grey rather than

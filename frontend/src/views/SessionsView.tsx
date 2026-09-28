@@ -538,7 +538,7 @@ export function SessionsView({ subTab = "sessions" }: { subTab?: SubTab }) {
           } catch (error) {
             toast(
               error instanceof ApiError && error.status === 409
-                ? "Stop recording before deleting the current session."
+                ? "Pause recording (● REC in the status bar) before deleting the session being recorded."
                 : "Could not delete session",
               "error",
             );

@@ -1098,24 +1098,41 @@ class TelemetryService:
             await self.repo.delete_session(session_id)
             self.sync.sessions.forget(session_id)
             if current:
-                if self.processor.session is not None:
-                    self.engineer.on_session(self.processor.session)
-                self.processor = LapProcessor(
-                    on_lap=self._on_lap,
-                    on_session=self._on_session,
-                    on_race_result=self._on_race_result,
-                    min_lap_ticks=self.processor.min_lap_ticks,
-                )
-                self.session_id = None
-                self.survey.session_id = None
-                self.track_name = ""
-                self._session_best_ms = None
-                self._prev_best_ms = None
-                self._set_best_ref(None)
-                self.event_watcher.reset()
-                self.sync.live.set_meta(car="", official_id="", track="")
-                self._publish({"type": "session", "data": await self.status()})
+                await self._reset_recorder()
         return True
+
+    async def clear_all_sessions(self) -> None:
+        """The "Delete all recorded data" action: every session and lap, the
+        recorder's own included. Unlike deleting one session this is allowed while
+        recording — the user typed DELETE to ask for it — so the recorder is
+        reset the same way, and recording carries on into a fresh session
+        instead of writing laps against a session that no longer exists."""
+        async with self.session_lock:
+            await self.repo.clear_all()
+            self.sync.sessions.forget_all()
+            await self._reset_recorder()
+
+    async def _reset_recorder(self) -> None:
+        """Forget the recorder's session: its unfinished lap, its best-lap
+        reference and its identity. Called under session_lock once that
+        session's rows are gone; the next packet opens a new session."""
+        if self.processor.session is not None:
+            self.engineer.on_session(self.processor.session)
+        self.processor = LapProcessor(
+            on_lap=self._on_lap,
+            on_session=self._on_session,
+            on_race_result=self._on_race_result,
+            min_lap_ticks=self.processor.min_lap_ticks,
+        )
+        self.session_id = None
+        self.survey.session_id = None
+        self.track_name = ""
+        self._session_best_ms = None
+        self._prev_best_ms = None
+        self._set_best_ref(None)
+        self.event_watcher.reset()
+        self.sync.live.set_meta(car="", official_id="", track="")
+        self._publish({"type": "session", "data": await self.status()})
 
     async def set_recording(self, recording: bool) -> None:
         async with self.session_lock:
