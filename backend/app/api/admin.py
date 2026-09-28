@@ -411,10 +411,7 @@ async def discover_console(request: Request) -> dict[str, Any]:
 
 @router.post("/clear-data")
 async def clear_data(request: Request) -> dict[str, str]:
-    service = svc(request)
-    await service.repo.clear_all()
-    service.session_id = None
-    service.sync.sessions.forget_all()
+    await svc(request).clear_all_sessions()
     log.warning("all recorded sessions and laps deleted via admin")
     return {"status": "cleared"}
 
