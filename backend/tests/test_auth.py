@@ -83,6 +83,9 @@ async def test_mutating_routes_require_token(secured) -> None:
         ("POST", "/api/admin/vacuum", None),
         ("PUT", "/api/admin/settings", {"log_level": "INFO"}),
         ("POST", "/api/admin/clear-data", None),
+        ("POST", "/api/track-suggestions/reject", {"track": "T", "official_id": "81f860"}),
+        ("POST", "/api/track-suggestions/clear", {"track": "T"}),
+        ("POST", "/api/track-bundles/shared/pull-all", None),
     ]
     for method, url, body in checks:
         bare = await c.request(method, url, json=body)
@@ -103,6 +106,9 @@ async def test_reads_stay_open_with_token_set(secured) -> None:
         "/api/laps",
         f"/api/laps/{lap_id}/export",
         f"/api/laps/{lap_id}/export.csv",
+        # Every lap at once is no more privileged than each one alone.
+        "/api/export/laps.zip",
+        "/api/export/laps-csv.zip",
         "/api/tracks",
         "/api/layouts",
     ):

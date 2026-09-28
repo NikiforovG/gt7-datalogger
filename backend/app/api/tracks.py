@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,6 +40,7 @@ from pydantic import BaseModel, Field
 
 from app.api.auth import require_admin
 from app.processing import (
+    shared_pull,
     shared_repo,
     survey_log,
     track_bundle,
@@ -60,7 +62,7 @@ router = APIRouter(prefix="/api")
 # An imported bundle is a JSON document of up to MAX_POINTS border records,
 # which is a few MB — but nothing stops a caller posting a gigabyte, and the
 # body is fully buffered before anything gets to validate it.
-MAX_IMPORT_BYTES = 64 * 1024 * 1024
+MAX_IMPORT_BYTES = shared_pull.MAX_IMPORT_BYTES
 
 
 def svc(request: Request) -> TelemetryService:
@@ -73,16 +75,8 @@ def data_dir(request: Request) -> Path:
 
 
 def _bundle_changed(request: Request, track: str, road: bool = True) -> None:
-    """A bundle was rewritten by hand: drop cached corners, queue a sync,
-    and — unless only the authored labels moved — re-judge every lap driven
-    on the circuit against the road as it now is (#91). Right away rather
-    than after the settle time: one explicit edit is one change, not a
-    survey in progress."""
-    service = svc(request)
-    service.invalidate_authored_corners(track)
-    service.sync.tracks.changed(track)
-    if road:
-        service.rejudge.changed(track, settle_s=0.0)
+    """A bundle was rewritten by hand; see `TelemetryService.bundle_changed`."""
+    svc(request).bundle_changed(track, road=road)
 
 
 def _catalog_path(request: Request) -> Path | None:
@@ -199,11 +193,17 @@ async def overview(request: Request) -> dict[str, Any]:
         if existing["length_m"] is None:
             existing["length_m"] = track["length_m"]
 
+    rejections = _parse_rejections((await service.repo.get_settings()).get(REJECTIONS_KEY))
     for row in rows.values():
+        ruled_out = rejections.get(row["slug"], [])
+        # How many layouts a human has said this is NOT, so the view can
+        # offer to take that back — the list itself is not interesting.
+        row["suggestion_rejected"] = len(ruled_out)
         if row["official"] is None:
-            # A guess, never a lookup: shown so a human can confirm it.
+            # A guess, never a lookup: shown so a human can confirm it — or
+            # rule it out, which moves the guess on to the runner-up.
             row["suggestion"] = track_catalog.suggest(
-                row["name"], configs, row["length_m"]
+                row["name"], configs, row["length_m"], exclude=set(ruled_out)
             )
 
     return {
@@ -226,6 +226,102 @@ async def overview(request: Request) -> dict[str, Any]:
             "error": tracks_sync.status()["error"],
         },
     }
+
+
+# --- "not this": ruling a suggested layout out -------------------------------
+
+# Settings-table JSON, {slug: [official_id, ...]}. Keyed on the slug because
+# that is what an overview row is keyed on — a DB name, a bundle and a
+# session label that spell the circuit differently are one row, and one
+# "not this" has to quiet all of them.
+REJECTIONS_KEY = "suggestion_rejections"
+# Read-modify-write of one settings value; two quick "Not this" clicks must
+# not each save a list the other never saw.
+_rejections_lock = asyncio.Lock()
+
+
+def _parse_rejections(raw: str | None) -> dict[str, list[str]]:
+    """The stored map, tolerating anything a hand-edited DB might hold: a
+    rejection that cannot be read is a suggestion shown again, not a 500 on
+    the Tracks page."""
+    if not raw:
+        return {}
+    try:
+        decoded: Any = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    return {
+        str(slug): [str(i) for i in ids if isinstance(i, str)]
+        for slug, ids in decoded.items()
+        if isinstance(ids, list)
+    }
+
+
+async def _update_rejections(
+    request: Request, slug: str, change: Callable[[list[str]], list[str]]
+) -> list[str]:
+    repo = svc(request).repo
+    async with _rejections_lock:
+        stored = _parse_rejections((await repo.get_settings()).get(REJECTIONS_KEY))
+        ids = change(stored.get(slug, []))
+        if ids:
+            stored[slug] = ids
+        else:
+            stored.pop(slug, None)
+        await repo.set_setting(
+            REJECTIONS_KEY, json.dumps(stored, separators=(",", ":"), sort_keys=True)
+        )
+    return ids
+
+
+class RejectSuggestionPayload(BaseModel):
+    track: str = Field(min_length=1, max_length=track_bundle.MAX_TRACK_NAME)
+    official_id: str = Field(min_length=1, max_length=64)
+
+
+@router.post("/track-suggestions/reject", dependencies=[Depends(require_admin)])
+async def reject_suggestion(
+    request: Request, payload: RejectSuggestionPayload
+) -> dict[str, Any]:
+    """Record that a track is NOT the official layout it was suggested as.
+
+    The suggestion is recomputed on every overview, so dismissing it only in
+    the browser left it re-offered on every other device and after every
+    cleared cache. Stored here, the next overview moves on to the runner-up
+    — or to no suggestion at all — everywhere at once.
+
+    Stored per installation and never synced: it is one person's verdict on
+    a guess, not evidence about the circuit, and the sync service files
+    bundles only by a CONFIRMED layout anyway.
+    """
+    slug = track_bundle.slugify(payload.track.strip())
+    official_id = payload.official_id.strip()
+    doc = _catalog(request)
+    known = {c["official_id"] for c in track_catalog.configurations(doc)} if doc else set()
+    if official_id not in known:
+        # Only a real configuration can be ruled out; anything else would sit
+        # in the settings table forever, excluding nothing.
+        raise HTTPException(400, f"no official layout {official_id!r} in the catalog")
+
+    def add(ids: list[str]) -> list[str]:
+        return ids if official_id in ids else [*ids, official_id]
+
+    return {"slug": slug, "rejected": await _update_rejections(request, slug, add)}
+
+
+class ClearRejectionsPayload(BaseModel):
+    track: str = Field(min_length=1, max_length=track_bundle.MAX_TRACK_NAME)
+
+
+@router.post("/track-suggestions/clear", dependencies=[Depends(require_admin)])
+async def clear_rejections(
+    request: Request, payload: ClearRejectionsPayload
+) -> dict[str, Any]:
+    """Forget every "not this" on one track, so the best guess comes back."""
+    slug = track_bundle.slugify(payload.track.strip())
+    return {"slug": slug, "rejected": await _update_rejections(request, slug, lambda _: [])}
 
 
 # --- the surveyed road, compiled for drawing (#51, #44) ------------------------
@@ -565,14 +661,11 @@ async def shared_bundles(request: Request) -> dict[str, Any]:
     if url is None:
         return {"configured": False, "bundles": []}
     try:
-        raw = await shared_repo.fetch_json(url, shared_repo.MAX_INDEX_BYTES)
-        entries = shared_repo.validate_index(raw)
+        entries = await shared_pull.fetch_index(url)
     except track_bundle.BundleError as exc:
         raise HTTPException(502, f"shared bundle repo: {exc}") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"shared bundle repo unreachable: {exc}") from exc
-    for entry in entries:
-        entry["slug"] = track_bundle.slugify(entry["track"])
     return {"configured": True, "url": url, "bundles": entries}
 
 
@@ -609,46 +702,37 @@ async def pull_shared_bundle(
     # the same reading the listing endpoint above gives them. 4xx is reserved
     # for the caller's own inputs (unknown slug, blank track override).
     try:
-        raw = await shared_repo.fetch_json(url, shared_repo.MAX_INDEX_BYTES)
-        entries = shared_repo.validate_index(raw)
-        entry = next(
-            (e for e in entries if track_bundle.slugify(e["track"]) == slug), None
-        )
+        entries = await shared_pull.fetch_index(url)
+        entry = next((e for e in entries if e["slug"] == slug), None)
         if entry is None:
             raise HTTPException(404, "the shared repo lists no such bundle")
-        bundle_url = shared_repo.resolve_url(url, entry["url"])
-        payload = await shared_repo.fetch_json(bundle_url, MAX_IMPORT_BYTES)
-        doc = track_bundle.validate_document(payload)
-        corrected: dict[str, Any] | None = None
-        if entry.get("corrections"):
-            # Fetched and checked BEFORE the merge, so a repo serving a bad
-            # corrections file changes nothing here rather than half of it.
-            corrections_url = shared_repo.resolve_url(url, entry["corrections"])
-            corrected = track_corrections.validate(
-                await shared_repo.fetch_json(corrections_url, MAX_IMPORT_BYTES)
-            )
-            official_id = str((doc["meta"].get("official") or {}).get("official_id") or "")
-            if official_id and corrected["official_id"] != official_id:
-                raise track_bundle.BundleError(
-                    f"corrections are for layout {corrected['official_id']!r}, "
-                    f"the bundle is {official_id!r}"
-                )
-        result = await asyncio.to_thread(
-            track_bundle.merge_document, data_dir(request), doc, track
+        result = await shared_pull.pull_entry(data_dir(request), url, entry, track)
+    except track_bundle.BundleError as exc:
+        raise HTTPException(502, f"shared bundle repo: {exc}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"shared bundle repo unreachable: {exc}") from exc
+    # A pull can give a circuit its first authored corners, same as import.
+    _bundle_changed(request, result["track"])
+    return result
+
+
+@router.post("/track-bundles/shared/pull-all", dependencies=[Depends(require_admin)])
+async def pull_all_shared_bundles(request: Request) -> dict[str, Any]:
+    """Pull every bundle the shared repo offers, each exactly as a one-circuit
+    pull would. Only an unreadable index fails the request (502); a circuit
+    the repo serves broken is listed under `failed` and the rest still come.
+    Safe to repeat: a re-pull counts nobody's runs twice."""
+    url = _shared_index_url(request)
+    if url is None:
+        raise HTTPException(404, "no shared bundle repo configured")
+    try:
+        return await shared_pull.pull_all(
+            data_dir(request), url, svc(request).bundle_changed
         )
     except track_bundle.BundleError as exc:
         raise HTTPException(502, f"shared bundle repo: {exc}") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"shared bundle repo unreachable: {exc}") from exc
-    if corrected is None or track_corrections.is_empty(corrected):
-        track_corrections.remove(data_dir(request), result["slug"])
-        result["corrections"] = None
-    else:
-        track_corrections.write(data_dir(request), result["slug"], corrected)
-        result["corrections"] = track_corrections.summary(corrected)
-    # A pull can give a circuit its first authored corners, same as import.
-    _bundle_changed(request, result["track"])
-    return result
 
 
 @router.get("/track-bundles/{slug}")

@@ -8,6 +8,7 @@ import type {
   CoachingNotes,
   CompareResult,
   ConnectionStatus,
+  ConsoleDiscovery,
   DeviationResult,
   ExcludeReason,
   FuelMapResult,
@@ -19,6 +20,8 @@ import type {
   RejudgeResult,
   SessionSummary,
   StintTrend,
+  SharedPullAll,
+  SuggestionRejections,
   SurveyEdge,
   SurveyDiscard,
   SurveyLog,
@@ -140,8 +143,8 @@ async function fail(url: string, resp: Response): Promise<never> {
   if (resp.status === 401 || resp.status === 403) {
     throw new ApiError(
       resp.status === 401
-        ? "admin token required — set it in Admin → Connection"
-        : "admin token rejected — check it in Admin → Connection",
+        ? "admin token required — set it in Settings › Access"
+        : "admin token rejected — check it in Settings › Access",
       resp.status,
     );
   }
@@ -202,6 +205,10 @@ export const api = {
   sessionZipUrl: (id: number) => `/api/sessions/${id}/export.zip`,
   // The lap analysis document (#115): the session measured per corner.
   sessionAnalysisUrl: (id: number) => `/api/sessions/${id}/analysis.json`,
+  // Every recorded lap in one streamed ZIP, a folder per session: the JSON
+  // export files (re-importable) or each lap's CSV. Settings' Back up row.
+  allLapsZipUrl: "/api/export/laps.zip",
+  allLapsCsvZipUrl: "/api/export/laps-csv.zip",
   // `track` narrows to one circuit's laps across every session — what the
   // Analysis "+ Add lap" picker feeds on (#26).
   laps: (track = "", category = "") => {
@@ -313,6 +320,15 @@ export const api = {
       "/api/tracks/identify",
       "POST",
     ),
+  // "Not this" on a suggested official layout: the next overview offers the
+  // runner-up, or no suggestion at all. `clear` takes every one of them back.
+  rejectSuggestion: (track: string, officialId: string) =>
+    send<SuggestionRejections>("/api/track-suggestions/reject", "POST", {
+      track,
+      official_id: officialId,
+    }),
+  clearRejectedSuggestions: (track: string) =>
+    send<SuggestionRejections>("/api/track-suggestions/clear", "POST", { track }),
   createTrack: (name: string, lapId: number) =>
     send<{ id: number; name: string }>("/api/tracks", "POST", { name, lap_id: lapId }),
   deleteTrack: (id: number) => send<{ status: string }>(`/api/tracks/${id}`, "DELETE"),
@@ -322,6 +338,9 @@ export const api = {
     // The configured shared repo's offerings; `configured: false` hides the
     // feature. Pulling merges through exactly the same path as import (#47).
     shared: () => get<SharedBundles>("/api/track-bundles/shared"),
+    // Every circuit the shared repo offers; a circuit it serves broken is
+    // listed under `failed` and the rest still come. Safe to repeat.
+    pullAllShared: () => send<SharedPullAll>("/api/track-bundles/shared/pull-all", "POST"),
     pullShared: (slug: string, track?: string) =>
       send<BundleMergeResult>(
         `/api/track-bundles/shared/${slug}/pull${track ? `?track=${encodeURIComponent(track)}` : ""}`,
@@ -373,7 +392,10 @@ export const api = {
       get<LayoutSummary>(`/api/layouts/${encodeURIComponent(String(ref))}`),
     create: (name: string, kind: "overlay" | "dash", config: LayoutConfig) =>
       send<LayoutSummary>("/api/layouts", "POST", { name, kind, config }),
-    update: (id: number, patch: { name?: string; config?: LayoutConfig }) =>
+    update: (
+      id: number,
+      patch: { name?: string; kind?: "overlay" | "dash"; config?: LayoutConfig },
+    ) =>
       send<LayoutSummary>(`/api/layouts/${id}`, "PUT", patch),
     remove: (id: number) => send<{ status: string }>(`/api/layouts/${id}`, "DELETE"),
   },
@@ -401,6 +423,9 @@ export const api = {
     clearLogs: () => send<{ status: string }>("/api/admin/logs", "DELETE"),
     stats: () => get<AdminStats>("/api/admin/stats"),
     restartSource: () => send<ConnectionStatus>("/api/admin/restart-source", "POST"),
+    // Find console: broadcasts the heartbeat for up to ~3 s even when an IP
+    // is set, and reports who answered without saving it.
+    discoverConsole: () => send<ConsoleDiscovery>("/api/admin/discover-console", "POST"),
     clearData: () => send<{ status: string }>("/api/admin/clear-data", "POST"),
     vacuum: () => send<{ status: string }>("/api/admin/vacuum", "POST"),
     updateCars: () =>

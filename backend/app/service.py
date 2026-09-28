@@ -283,6 +283,18 @@ class TelemetryService:
         self._authored_sections.pop(key, None)
         self._official_ids.pop(track, None)
 
+    def bundle_changed(self, track: str, road: bool = True) -> None:
+        """A bundle was rewritten outside a survey (an edit, an import, a
+        pull): drop cached corners, queue a sync, and — unless only the
+        authored labels moved — re-judge every lap driven on the circuit
+        against the road as it now is (#91). Right away rather than after the
+        settle time: one explicit change is one change, not a survey in
+        progress."""
+        self.invalidate_authored_corners(track)
+        self.sync.tracks.changed(track)
+        if road:
+            self.rejudge.changed(track, settle_s=0.0)
+
     async def official_id_for(self, track: str) -> str:
         """The GT7 layout id behind a circuit name, if anything knows it: a
         seeded signature carries one, and so does a bundle whose layout a
@@ -358,6 +370,21 @@ class TelemetryService:
 
     async def restart_source(self) -> None:
         await self.switch_source(self.settings.source)
+
+    async def discover_console(self) -> dict[str, Any]:
+        """Find console: which address answers a broadcast heartbeat.
+
+        Only reports — the saved IP is the user's to change (the Settings
+        page fills its draft and waits for Apply). The simulator has no
+        console to find, and a stopped listener has no socket to ask with;
+        both say so rather than read as "not found".
+        """
+        if not isinstance(self.source, UdpTelemetrySource):
+            return {"found": False, "ip": None, "reason": "simulated source"}
+        if not self.source.running:
+            return {"found": False, "ip": None, "reason": "listener not running"}
+        ip = await self.source.discover()
+        return {"found": ip is not None, "ip": ip}
 
     # --- pipeline callbacks -------------------------------------------------
 

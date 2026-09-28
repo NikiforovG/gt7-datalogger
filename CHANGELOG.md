@@ -5,6 +5,21 @@ Notable changes to GT7 Datalogger. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Web UI usability revamp.** Admin is renamed **Settings**. It now has a
+  section rail, a health strip, and a single Apply bar that sends every
+  buffered edit in one request, replacing seven separate Apply buttons. The
+  overlay builder moves to its own **Overlays** tab. Sessions becomes a
+  master–detail view with a lap-time chart, a bulk-action bar and
+  auto-hidden constant columns. Tracks gains a "Needs you" list and a
+  readiness checklist. Live is denser: shift lights, a Δ card and a pinned
+  in-progress lap. `/engineer` and `/dash` are rebuilt for touch. New
+  route-level pages cover 404, a locked server, server errors, an
+  unreachable server and a silent console. The status bar shows telemetry
+  as a labelled dot. The fastest lap is purple everywhere. `#/admin` links
+  still work.
+
 ### Fixed
 
 - **Menus, pit stops and pauses no longer merge or split sessions.** (#120,
@@ -92,6 +107,60 @@ Notable changes to GT7 Datalogger. The format follows
 
 ### Added
 
+- **A fresh installation starts with every shared circuit.** On its first
+  start, an installation holding no track bundles pulls every circuit from
+  the shared track repo in the background, so the known circuits are named
+  and drawn from the first lap. It happens once. An installation already
+  holding a bundle is left alone, and one that is offline tries again at its
+  next start. **Tracks › Import ▾ › Pull all from shared** (and **Pull all**
+  in the shared list) does the same on demand. Re-pulling is safe: nobody's
+  runs are counted twice, so only what changed is added. A circuit the repo
+  serves broken is reported and the rest are still pulled. The endpoint is
+  `POST /api/track-bundles/shared/pull-all`. A blank
+  `GT7_SHARED_BUNDLES_URL` turns pulling off, the first-start pull included.
+- **"Not this" on a suggested official layout is remembered by the server.**
+  Ruling a suggestion out on the Tracks page used to hide it in one browser
+  only, while every other device kept offering the same guess. The rejection
+  is now stored per circuit on this installation (never synced), and the
+  next suggestion is the runner-up, or none when nothing else in the catalog
+  is close enough. It works for circuits with no survey bundle too. The
+  checklist shows how many layouts were ruled out and, when none is left to
+  suggest, offers **Suggest again** to take them all back. New admin
+  endpoints: `POST /api/track-suggestions/reject` and
+  `POST /api/track-suggestions/clear`.
+
+- **Find console.** Settings › Connection has a **Find console** button next
+  to the console IP. It broadcasts the heartbeat for up to three seconds,
+  even when an IP is saved, and fills in the address that answers with GT7
+  telemetry; Apply saves it. The live stream is not interrupted, and a
+  console that answered only the search stays out of the recording.
+
+- **A saved layout can switch between OBS overlay and driver dash.** Flip
+  the kind in the Overlays builder and Save sends it with the rest of the
+  edit; it used to force "Save as a new layout". Kind only decides which
+  list a layout appears in — `/overlay?layout=` and `/dash?layout=` render
+  any layout — so no URL already in use stops working. `PUT
+  /api/layouts/{id}` accepts `kind`.
+- **Sessions pins the lap in progress.** While the selected session is the
+  one being recorded, the lap being driven sits at the top of the lap table
+  with its running time and live Δ to the session best, whatever the sort.
+  It has no checkbox or menu, hands over to the completed row when the lap
+  is stored, and drops out when telemetry goes quiet for 5 s or the car
+  leaves the track. Only that row updates at frame rate; the table does not
+  re-render.
+- **Back up every lap in one download.** Settings › Data has **Export all
+  laps (JSON)** and **CSV (all laps)**. Each gives one ZIP with a folder per
+  session. The JSON archive holds each lap's export file, the same file
+  `GET /api/laps/{id}/export` serves, so each lap can be imported again. It
+  also holds the session's `session.json`. The CSV archive holds each lap's
+  CSV, the same file `GET /api/laps/{id}/export.csv` serves. Both archives
+  are streamed a lap at a time, so a large database starts downloading at
+  once and never sits whole in memory or in a temporary file. The endpoints
+  are `GET /api/export/laps.zip` and `GET /api/export/laps-csv.zip`. Like
+  the single-lap exports, they do not need the admin token. **Compact
+  database** now says roughly how much it would reclaim, once that is 1 MB
+  or more. `GET /api/admin/stats` reports the figure as
+  `db.reclaimable_bytes`.
 - **The corner report card says where you braked against the reference.**
   (#110) "Braked 14 m earlier into T3" is a number a driver can act on next
   lap, and the card did not have it. Three columns now say how each corner

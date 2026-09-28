@@ -1,17 +1,28 @@
-// Minimal hash router: #/live, #/analysis, #/sessions, #/tracks, #/admin, with optional
+// Minimal hash router: #/live, #/analysis, #/sessions, #/tracks, #/settings, with optional
 // query params (#/analysis?session=3&laps=12,15&ref=15). The URL is the single
 // source of truth for cross-view handoff (Sessions/Live → Analysis) and makes
 // every view bookmarkable. The /overlay path is handled separately (lib/overlay).
+// A path that names no view parses to "notfound" (the 404 page) rather than
+// quietly landing on Live; "notfound" has no tab and is never navigated to.
 
-export type View = "live" | "analysis" | "sessions" | "survey" | "tracks" | "admin";
+export type View =
+  | "notfound"
+  | "live"
+  | "analysis"
+  | "sessions"
+  | "survey"
+  | "tracks"
+  | "overlays"
+  | "settings";
 
-const VIEWS: readonly View[] = [
+const VIEWS: readonly Exclude<View, "notfound">[] = [
   "live",
   "analysis",
   "sessions",
   "survey",
   "tracks",
-  "admin",
+  "overlays",
+  "settings",
 ];
 
 export interface Route {
@@ -22,15 +33,25 @@ export interface Route {
 export function parseHash(hash: string): Route {
   const stripped = hash.replace(/^#\/?/, "");
   const qIndex = stripped.indexOf("?");
-  const path = qIndex >= 0 ? stripped.slice(0, qIndex) : stripped;
+  // A trailing slash (#/sessions/) names the same view.
+  const path = (qIndex >= 0 ? stripped.slice(0, qIndex) : stripped).replace(/\/+$/, "");
   const query = qIndex >= 0 ? stripped.slice(qIndex + 1) : "";
   const params = new URLSearchParams(query);
+  // Settings sections live in the path (#/settings/sync); Admin was renamed
+  // Settings, so old #/admin links land there too.
+  const [head, section] = path.split("/", 2);
+  if (head === "settings" || head === "admin") {
+    if (section) params.set("section", section);
+    return { view: "settings", params };
+  }
   // Bests folded into Sessions as a sub-tab; keep old #/bests links working.
   if (path === "bests") {
     params.set("sub", "bests");
     return { view: "sessions", params };
   }
-  const view = (VIEWS as readonly string[]).includes(path) ? (path as View) : "live";
+  // The bare origin (no hash, "#", "#/") is Live.
+  if (path === "") return { view: "live", params };
+  const view = (VIEWS as readonly string[]).includes(path) ? (path as View) : "notfound";
   return { view, params };
 }
 
@@ -41,6 +62,14 @@ export function routeHash(view: View, params?: Record<string, string>): string {
 
 export function navigate(view: View, params?: Record<string, string>): void {
   window.location.hash = routeHash(view, params);
+}
+
+export function settingsHash(section?: string): string {
+  return section ? `#/settings/${section}` : "#/settings";
+}
+
+export function openSettings(section?: string): void {
+  window.location.hash = settingsHash(section);
 }
 
 // Selection handed to the Analysis view via URL params.

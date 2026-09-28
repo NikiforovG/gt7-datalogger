@@ -328,6 +328,9 @@ export interface TrackOverviewRow {
   sessions: number;
   official: OfficialMatch | null;
   suggestion: OfficialSuggestion | null;
+  // Layouts a human has ruled out for this row ("Not this"), stored
+  // server-side; `suggestion` is already the best guess among the rest.
+  suggestion_rejected: number;
   sync: TrackSyncStatus | null;
 }
 
@@ -1013,7 +1016,15 @@ export interface LogRecord {
 
 export interface AdminStats {
   uptime_s: number;
-  db: { sessions: number; laps: number; size_bytes: number; path: string };
+  db: {
+    sessions: number;
+    laps: number;
+    size_bytes: number;
+    // Free pages a VACUUM ("Compact") would hand back: space deleted laps
+    // left in the file.
+    reclaimable_bytes: number;
+    path: string;
+  };
   cars_loaded: number;
   source: ConnectionStatus;
   clients: number;
@@ -1030,3 +1041,27 @@ export type WsMessage =
   | { type: "voice_callout"; data: VoiceCallout }
   | { type: "voice_output_status"; data: { active_client_id: string } }
   | { type: "race_engineer_status"; data: RaceEngineerStatus };
+
+// Find console (POST /api/admin/discover-console): which address answered a
+// broadcast heartbeat with GT7 telemetry. Reported only — nothing is saved.
+// `reason` says why no search ran (the simulator, a stopped listener).
+export interface ConsoleDiscovery {
+  found: boolean;
+  ip: string | null;
+  reason?: string;
+}
+
+// What POST /api/track-suggestions/reject and /clear answer: the official
+// ids now ruled out for the track, keyed by its slug like an overview row.
+// Local to this installation — never synced.
+export interface SuggestionRejections {
+  slug: string;
+  rejected: string[];
+}
+
+// What POST /api/track-bundles/shared/pull-all answers: the circuits merged
+// (added_points 0 when nothing new came) and the ones the repo served broken.
+export interface SharedPullAll {
+  pulled: { slug: string; track: string; added_points: number }[];
+  failed: { slug: string; track: string; error: string }[];
+}
