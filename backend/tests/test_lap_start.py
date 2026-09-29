@@ -293,7 +293,7 @@ async def test_qualifying_unknown_context_and_mid_race_laps_still_count(
     assert c.laps[0].counts_for_best is True
 
 
-async def test_old_race_starts_are_excluded_once_without_overwriting_rulings(repo):
+async def test_old_race_starts_are_excluded_once_without_overwriting_rulings(repo, monkeypatch):
     races = []
     for override in (None, True, False):
         ids = await store(repo, await recorded_laps(0.0))
@@ -307,7 +307,17 @@ async def test_old_race_starts_are_excluded_once_without_overwriting_rulings(rep
     mid = await repo.get_lap(mid_race[2])
     await repo.record_race_result(mid["session_id"], 3, 12, 3)
 
-    await recheck_lap_starts(repo, {LAP_START_CHECK_KEY: "1"}, logging.getLogger(__name__))
+    sample_reads = []
+    read_samples = repo.lap_samples_json
+
+    async def record_sample_read(lap_id):
+        sample_reads.append(lap_id)
+        return await read_samples(lap_id)
+
+    monkeypatch.setattr(repo, "lap_samples_json", record_sample_read)
+    await repo.set_setting(LAP_START_CHECK_KEY, "1")
+    await recheck_lap_starts(repo, await repo.get_settings(), logging.getLogger(__name__))
+    assert sample_reads == []
     first = await repo.get_lap(races[0][1])
     assert first["counts_for_best"] is False
     assert first["full_lap"] is True
@@ -320,7 +330,7 @@ async def test_old_race_starts_are_excluded_once_without_overwriting_rulings(rep
     # Clearing the exclusion must survive the next startup.
     await repo.set_lap_best_override(races[0][1], None)
     await recheck_lap_starts(
-        repo, {LAP_START_CHECK_KEY: LAP_START_CHECK_VERSION}, logging.getLogger(__name__)
+        repo, await repo.get_settings(), logging.getLogger(__name__)
     )
     assert (await repo.get_lap(races[0][1]))["counts_for_best"] is True
 
@@ -341,3 +351,54 @@ async def test_salvaged_race_start_does_not_leak_into_next_qualifying_session(se
     assert qualifying.counts_for_best is True
     assert qualifying.best_override is None
     assert qualifying.exclude_reason == ""
+
+
+async def test_failed_race_start_update_retries_without_repeating_geometry(repo, monkeypatch):
+    ids = await store(repo, await recorded_laps(0.0))
+    first = await repo.get_lap(ids[1])
+    await repo.record_race_result(first["session_id"], 3, 12, 3)
+    update_race_starts = repo.exclude_recorded_race_starts
+
+    async def fail_update():
+        raise RuntimeError("temporary storage failure")
+
+    monkeypatch.setattr(repo, "exclude_recorded_race_starts", fail_update)
+    await recheck_lap_starts(repo, {}, logging.getLogger(__name__))
+    stored = await repo.get_settings()
+    assert stored.get(LAP_START_CHECK_KEY) == LAP_START_CHECK_VERSION
+    assert (await repo.get_lap(ids[1]))["counts_for_best"] is True
+
+    sample_reads = []
+    read_samples = repo.lap_samples_json
+
+    async def record_sample_read(lap_id):
+        sample_reads.append(lap_id)
+        return await read_samples(lap_id)
+
+    monkeypatch.setattr(repo, "lap_samples_json", record_sample_read)
+    monkeypatch.setattr(repo, "exclude_recorded_race_starts", update_race_starts)
+    await recheck_lap_starts(repo, stored, logging.getLogger(__name__))
+    assert sample_reads == []
+    assert (await repo.get_lap(ids[1]))["exclude_reason"] == "race-start"
+
+
+async def test_geometry_retry_keeps_a_completed_race_start_update(repo, monkeypatch):
+    ids = await store(repo, await recorded_laps(0.0))
+    first = await repo.get_lap(ids[1])
+    await repo.record_race_result(first["session_id"], 3, 12, 3)
+    scan_geometry = repo.recheck_lap_starts
+
+    async def fail_scan():
+        raise RuntimeError("temporary geometry failure")
+
+    monkeypatch.setattr(repo, "recheck_lap_starts", fail_scan)
+    await recheck_lap_starts(repo, {}, logging.getLogger(__name__))
+    stored = await repo.get_settings()
+    assert LAP_START_CHECK_KEY not in stored
+    assert (await repo.get_lap(ids[1]))["exclude_reason"] == "race-start"
+
+    await repo.set_lap_best_override(ids[1], None)
+    monkeypatch.setattr(repo, "recheck_lap_starts", scan_geometry)
+    await recheck_lap_starts(repo, stored, logging.getLogger(__name__))
+    assert (await repo.get_settings())[LAP_START_CHECK_KEY] == LAP_START_CHECK_VERSION
+    assert (await repo.get_lap(ids[1]))["counts_for_best"] is True

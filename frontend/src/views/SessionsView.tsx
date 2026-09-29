@@ -39,6 +39,7 @@ import {
 } from "@/lib/sessionList";
 import {
   EXCLUDE_REASONS,
+  excludeReasonLabel,
   type ExcludeReason,
   type LapSummary,
   notCountingLabel,
@@ -1325,7 +1326,7 @@ function LapTable({
                             placeholder="excluded · why?"
                             options={EXCLUDE_REASONS.map((r) => ({
                               value: r,
-                              label: `excluded · ${r === "race-start" ? "Race start" : r}`,
+                              label: `excluded · ${excludeReasonLabel(r)}`,
                             }))}
                             onValueChange={(r) =>
                               onRule(lap, {

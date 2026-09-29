@@ -238,8 +238,12 @@ clearing the ruling restores the geometry verdict.
 
 The startup recheck also excludes stored lap 1s belonging to sessions with a
 positive race distance and a valid recorded finish in a field of at least two.
-Only rows without an existing override are changed. The versioned startup marker
-prevents this update from reapplying after a user clears an exclusion.
+Only rows without an existing override are changed. Geometry uses the existing
+`lap_start_check` marker; the SQL exclusion update has its own `race_start_check`
+marker. An installation that completed the geometry scan runs only the SQL update.
+Each marker is saved after its operation succeeds, so a failure retries only the
+unfinished work. The race-start marker also prevents reapplying the update after
+a user clears an exclusion.
 
 Calibrated against 850 recorded laps of real driving:
 
