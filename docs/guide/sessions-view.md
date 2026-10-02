@@ -49,7 +49,7 @@ session you are driving.
 
 **Consistency** is the standard deviation of the lap times, taken over the laps that
 [count toward bests](#excluding-a-lap-from-bests) only; it needs three of them.
-Race opening laps labelled **excluded · Race start** do not enter this figure.
+Race opening laps labelled **excluded · race start** do not enter this figure.
 
 Then the **Lap time by lap** chart — every lap's time in order, the best in purple, a
 dashed median line and the spread band; its footer gives the spread as a percentage
@@ -129,7 +129,7 @@ use the bulk bar). The lap leaves every best at once: the session best, the
 [Bests board](bests-view.md), the [class benchmark](analysis-view.md#side-panels),
 and the Race Engineer's pace and coaching comparisons. The lap is dimmed and an
 **excluded · why?** picker appears beside its number — *off-track*, *contact*,
-*restart*, *dirty*, *pit-out* or *Race start* — and the Bests board shows that reason
+*restart*, *dirty*, *pit-out* or *race start* — and the Bests board shows that reason
 next to the time it replaced.
 
 It works the other way too. The
@@ -140,13 +140,13 @@ If the guard got one wrong, **Count for bests** in the lap's **⋯** menu makes 
 hands it back to the guard, so a lap you excluded and then counted again follows the
 guard again rather than staying pinned.
 
-**Race opening laps** are automatically excluded with the reason **Race start**,
+**Race opening laps** are automatically excluded with the reason **race start**,
 for both standing and rolling starts. Detection requires lap 1 and a packet during
 that lap reporting a positive race distance and a position in a field of at least
 two. A complete opening lap keeps its full-lap verdict; its starting conditions are
 why it is excluded. Qualifying lap 1 and the first recorded lap of a mid-race join
 are not excluded by this rule. If race metadata is missing, use **Exclude from
-bests**, then select **Race start** yourself. **Count for bests** can include it again.
+bests**, then select **race start** yourself. **Count for bests** can include it again.
 
 Existing sessions with a recorded race result are updated once at startup, leaving
 any existing manual rulings intact. Older recordings without a confirmed result

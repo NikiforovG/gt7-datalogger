@@ -45,7 +45,7 @@ describe("lapConsistency", () => {
     const c = lapConsistency([start, lap(90_000), lap(90_200), lap(90_400)])!;
     expect(c.laps).toBe(3);
     expect(c.stdMs).toBeCloseTo(200, 6);
-    expect(notCountingLabel(start)).toBe("excluded · Race start");
+    expect(notCountingLabel(start)).toBe("excluded · race start");
   });
 
   it("treats a lap with no verdict recorded as one that counts", () => {

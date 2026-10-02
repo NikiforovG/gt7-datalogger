@@ -8,7 +8,7 @@ Notable changes to GT7 Datalogger. The format follows
 ### Fixed
 
 - **Race opening laps no longer inflate consistency.** Confirmed lap 1s from
-  standing and rolling starts are excluded from bests with the reason **Race start**,
+  standing and rolling starts are excluded from bests with the reason **race start**,
   so the existing consistency calculation leaves them out too. Full-lap geometry
   and telemetry are preserved, and the exclusion can be overridden. Existing
   sessions with a recorded race result are updated once, preserving manual rulings.

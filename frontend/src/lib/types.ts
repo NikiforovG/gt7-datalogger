@@ -114,7 +114,7 @@ export const EXCLUDE_REASONS = [
 export type ExcludeReason = (typeof EXCLUDE_REASONS)[number];
 
 export function excludeReasonLabel(reason: ExcludeReason | "" | undefined): string {
-  return reason === "race-start" ? "Race start" : (reason ?? "");
+  return reason === "race-start" ? "race start" : (reason ?? "");
 }
 
 /** Why a lap does not count toward bests, in a word or two; null if it does. */

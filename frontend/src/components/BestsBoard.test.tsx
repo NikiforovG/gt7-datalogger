@@ -26,7 +26,7 @@ describe("BestsBoard exclusions", () => {
     const html = renderToStaticMarkup(
       <TooltipProvider><BestsBoard bests={[best]} /></TooltipProvider>,
     );
-    expect(html).toContain("Race start");
+    expect(html).toContain("race start");
     expect(html).not.toContain("race-start");
   });
 });
